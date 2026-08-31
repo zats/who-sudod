@@ -4,7 +4,7 @@ import Permiso
 
 @main
 @MainActor
-enum WhoSudoApplication {
+enum WhoSudodApplication {
     static func main() {
         let application = NSApplication.shared
         let delegate = AppDelegate()
@@ -46,9 +46,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         item.button?.image = NSImage(
             systemSymbolName: "person.badge.key.fill",
-            accessibilityDescription: "Who Sudo"
+            accessibilityDescription: "Who Sudo'd"
         )
-        item.button?.toolTip = "Who Sudo"
+        item.button?.toolTip = "Who Sudo'd"
 
         let menu = NSMenu()
         let status = NSMenuItem(title: "Starting monitor…", action: nil, keyEquivalent: "")
@@ -64,7 +64,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(access)
         menu.addItem(.separator())
 
-        let quit = NSMenuItem(title: "Quit Who Sudo", action: #selector(quit), keyEquivalent: "q")
+        let quit = NSMenuItem(title: "Quit Who Sudo'd", action: #selector(quit), keyEquivalent: "q")
         quit.target = self
         menu.addItem(quit)
 

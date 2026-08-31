@@ -1,4 +1,4 @@
-name: WhoSudo
+name: WhoSudod
 
 options:
   bundleIdPrefix: com.zats
@@ -19,32 +19,34 @@ settings:
     ENABLE_APP_SANDBOX: NO
 
 targets:
-  WhoSudo:
+  WhoSudod:
     type: application
     platform: macOS
+    productName: "Who Sudo'd"
     sources:
-      - path: WhoSudo
+      - path: WhoSudod
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.zats.WhoSudo
-        PRODUCT_NAME: WhoSudo
-        INFOPLIST_KEY_CFBundleDisplayName: Who Sudo
+        PRODUCT_MODULE_NAME: WhoSudod
+        PRODUCT_NAME: "Who Sudo'd"
+        INFOPLIST_KEY_CFBundleDisplayName: "Who Sudo'd"
         INFOPLIST_KEY_LSUIElement: YES
         GENERATE_INFOPLIST_FILE: YES
     dependencies:
       - package: Permiso
     scheme:
       testTargets:
-        - WhoSudoTests
+        - WhoSudodTests
 
-  WhoSudoTests:
+  WhoSudodTests:
     type: bundle.unit-test
     platform: macOS
     sources:
-      - path: WhoSudoTests
+      - path: WhoSudodTests
     dependencies:
-      - target: WhoSudo
+      - target: WhoSudod
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.zats.WhoSudoTests
+        PRODUCT_BUNDLE_IDENTIFIER: com.zats.WhoSudodTests
         GENERATE_INFOPLIST_FILE: YES

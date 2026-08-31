@@ -15,10 +15,10 @@
             buildForAnalyzing = "YES">
             <BuildableReference
                BuildableIdentifier = "primary"
-               BlueprintIdentifier = "A5A3253EC7BA2B112D129E19"
-               BuildableName = "WhoSudo.app"
-               BlueprintName = "WhoSudo"
-               ReferencedContainer = "container:WhoSudo.xcodeproj">
+               BlueprintIdentifier = "F8466B555E3196D5F26B52A7"
+               BuildableName = "Who Sudo&apos;d.app"
+               BlueprintName = "WhoSudod"
+               ReferencedContainer = "container:WhoSudod.xcodeproj">
             </BuildableReference>
          </BuildActionEntry>
       </BuildActionEntries>
@@ -32,10 +32,10 @@
       <MacroExpansion>
          <BuildableReference
             BuildableIdentifier = "primary"
-            BlueprintIdentifier = "A5A3253EC7BA2B112D129E19"
-            BuildableName = "WhoSudo.app"
-            BlueprintName = "WhoSudo"
-            ReferencedContainer = "container:WhoSudo.xcodeproj">
+            BlueprintIdentifier = "F8466B555E3196D5F26B52A7"
+            BuildableName = "Who Sudo&apos;d.app"
+            BlueprintName = "WhoSudod"
+            ReferencedContainer = "container:WhoSudod.xcodeproj">
          </BuildableReference>
       </MacroExpansion>
       <Testables>
@@ -44,10 +44,10 @@
             parallelizable = "NO">
             <BuildableReference
                BuildableIdentifier = "primary"
-               BlueprintIdentifier = "7D46BB0D4D8A2198677B00E8"
-               BuildableName = "WhoSudoTests.xctest"
-               BlueprintName = "WhoSudoTests"
-               ReferencedContainer = "container:WhoSudo.xcodeproj">
+               BlueprintIdentifier = "E0E73CF8347D3304657089D6"
+               BuildableName = "WhoSudodTests.xctest"
+               BlueprintName = "WhoSudodTests"
+               ReferencedContainer = "container:WhoSudod.xcodeproj">
             </BuildableReference>
          </TestableReference>
       </Testables>
@@ -68,10 +68,10 @@
          runnableDebuggingMode = "0">
          <BuildableReference
             BuildableIdentifier = "primary"
-            BlueprintIdentifier = "A5A3253EC7BA2B112D129E19"
-            BuildableName = "WhoSudo.app"
-            BlueprintName = "WhoSudo"
-            ReferencedContainer = "container:WhoSudo.xcodeproj">
+            BlueprintIdentifier = "F8466B555E3196D5F26B52A7"
+            BuildableName = "Who Sudo&apos;d.app"
+            BlueprintName = "WhoSudod"
+            ReferencedContainer = "container:WhoSudod.xcodeproj">
          </BuildableReference>
       </BuildableProductRunnable>
       <CommandLineArguments>
@@ -87,10 +87,10 @@
          runnableDebuggingMode = "0">
          <BuildableReference
             BuildableIdentifier = "primary"
-            BlueprintIdentifier = "A5A3253EC7BA2B112D129E19"
-            BuildableName = "WhoSudo.app"
-            BlueprintName = "WhoSudo"
-            ReferencedContainer = "container:WhoSudo.xcodeproj">
+            BlueprintIdentifier = "F8466B555E3196D5F26B52A7"
+            BuildableName = "Who Sudo&apos;d.app"
+            BlueprintName = "WhoSudod"
+            ReferencedContainer = "container:WhoSudod.xcodeproj">
          </BuildableReference>
       </BuildableProductRunnable>
       <CommandLineArguments>

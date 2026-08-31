@@ -1,6 +1,6 @@
 import Darwin
 import XCTest
-@testable import WhoSudo
+@testable import WhoSudod
 
 final class ProcessTreeSnapshotTests: XCTestCase {
     func testBuildsOldestToSudoChainForCurrentUser() {

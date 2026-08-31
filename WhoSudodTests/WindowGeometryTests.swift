@@ -1,6 +1,6 @@
 import CoreGraphics
 import XCTest
-@testable import WhoSudo
+@testable import WhoSudod
 
 final class WindowGeometryTests: XCTestCase {
     func testEnvelopeCornerRadiusAddsDialogPadding() {
