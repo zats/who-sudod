@@ -1,0 +1,50 @@
+name: WhoSudo
+
+options:
+  bundleIdPrefix: com.zats
+  deploymentTarget:
+    macOS: "26.0"
+  xcodeVersion: "27.0"
+
+packages:
+  Permiso:
+    path: ../Libraries/permiso
+
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+    DEVELOPMENT_TEAM: 5KE88HWMKJ
+    CODE_SIGN_STYLE: Automatic
+    ENABLE_HARDENED_RUNTIME: YES
+    ENABLE_APP_SANDBOX: NO
+
+targets:
+  WhoSudo:
+    type: application
+    platform: macOS
+    sources:
+      - path: WhoSudo
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.zats.WhoSudo
+        PRODUCT_NAME: WhoSudo
+        INFOPLIST_KEY_CFBundleDisplayName: Who Sudo
+        INFOPLIST_KEY_LSUIElement: YES
+        GENERATE_INFOPLIST_FILE: YES
+    dependencies:
+      - package: Permiso
+    scheme:
+      testTargets:
+        - WhoSudoTests
+
+  WhoSudoTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - path: WhoSudoTests
+    dependencies:
+      - target: WhoSudo
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.zats.WhoSudoTests
+        GENERATE_INFOPLIST_FILE: YES
