@@ -3,7 +3,6 @@ import Foundation
 import os
 
 struct AuthorizationMonitorStatus: Equatable {
-    let message: String
     let accessibilityTrusted: Bool
     let isShowingPanel: Bool
 }
@@ -37,10 +36,12 @@ enum AuthenticationEvidenceSelection {
         surfaceKind: AuthenticationSurfaceKind,
         firstSeenAt: Date,
         now: Date,
-        maximumLeadTime: TimeInterval = 3,
+        maximumLeadTime: TimeInterval? = nil,
         maximumLagTime: TimeInterval = 3
     ) -> [AuthenticationClientEvent] {
-        let earliest = firstSeenAt.addingTimeInterval(-maximumLeadTime)
+        let allowedLeadTime = maximumLeadTime
+            ?? (surfaceKind == .localAuthentication ? 5 : 3)
+        let earliest = firstSeenAt.addingTimeInterval(-allowedLeadTime)
         let latest = min(now, firstSeenAt.addingTimeInterval(maximumLagTime))
         let eligible = events.filter { event in
             event.receivedAt >= earliest
@@ -154,7 +155,7 @@ final class AuthorizationPromptMonitor: NSObject {
             lastProcessSnapshot = .pending
             observationStability.reset()
             panel.hide()
-            report(message: "Accessibility access is required", isShowingPanel: false)
+            report(isShowingPanel: false)
             return
         }
         eventMonitor.start()
@@ -174,7 +175,7 @@ final class AuthorizationPromptMonitor: NSObject {
                 observationStability.reset()
                 panel.hide()
                 nextDiscoveryTime = 0
-                report(message: waitingMessage, isShowingPanel: false)
+                report(isShowingPanel: false)
                 return
             }
             target = current
@@ -188,7 +189,7 @@ final class AuthorizationPromptMonitor: NSObject {
         nextDiscoveryTime = now + 0.20
 
         guard let candidate = AuthenticationWindowLocator.frontmostCandidate() else {
-            report(message: waitingMessage, isShowingPanel: false)
+            report(isShowingPanel: false)
             return
         }
 
@@ -200,19 +201,20 @@ final class AuthorizationPromptMonitor: NSObject {
     }
 
     private func updatePanel(for window: AuthenticationWindowSnapshot, now: TimeInterval) {
-        guard isAuthenticationWindowFocused(window) == true else {
+        switch isAuthenticationWindowFocused(window) {
+        case true:
+            observationStability.recordConfirmation()
+        case false:
+            observationStability.reset()
+            hideForLostFocus(window: window, now: now)
+            return
+        case nil:
             guard observationStability.recordMiss() else {
                 return
             }
-            let wasPresented = panel.isPresented
-            panel.hide()
-            if wasPresented {
-                report(message: "Authentication dialog is not focused", isShowingPanel: false)
-            }
-            switchToFocusedCandidate(excluding: window.identity, now: now)
+            hideForLostFocus(window: window, now: now)
             return
         }
-        observationStability.recordConfirmation()
 
         if now >= nextProcessScanTime, processScanTask == nil {
             nextProcessScanTime = now + 0.15
@@ -224,15 +226,19 @@ final class AuthorizationPromptMonitor: NSObject {
             authenticationFrame: window.frame,
             visibleFrame: window.visibleFrame
         )
-        if let chain = lastProcessSnapshot.candidates.first {
-            let verification = chain.attribution.isLogAttributed ? "observed" : "likely"
-            let freshness = lastProcessSnapshot.inspectionState == .requesterExited
-                ? "last known"
-                : "live"
-            report(message: "Showing \(verification) \(freshness) requester", isShowingPanel: true)
-        } else {
-            report(message: "Authentication dialog detected; finding requester", isShowingPanel: true)
+        report(isShowingPanel: true)
+    }
+
+    private func hideForLostFocus(
+        window: AuthenticationWindowSnapshot,
+        now: TimeInterval
+    ) {
+        let wasPresented = panel.isPresented
+        panel.hide()
+        if wasPresented {
+            report(isShowingPanel: false)
         }
+        switchToFocusedCandidate(excluding: window.identity, now: now)
     }
 
     private func startProcessScan(for window: AuthenticationWindowSnapshot) {
@@ -340,16 +346,9 @@ final class AuthorizationPromptMonitor: NSObject {
         self.processScanTask = nil
     }
 
-    private var waitingMessage: String {
-        AccessibilityFocusReader.isTrusted
-            ? "Waiting for an authentication dialog…"
-            : "Waiting… Accessibility access is required"
-    }
-
-    private func report(message: String, isShowingPanel: Bool) {
+    private func report(isShowingPanel: Bool) {
         statusHandler(
             AuthorizationMonitorStatus(
-                message: message,
                 accessibilityTrusted: AccessibilityFocusReader.isTrusted,
                 isShowingPanel: isShowingPanel
             )

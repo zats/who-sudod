@@ -24,7 +24,6 @@ enum WhoSudodApplication {
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var monitor: AuthorizationPromptMonitor?
     private var statusItem: NSStatusItem?
-    private var statusMenuItem: NSMenuItem?
     private var accessMenuItem: NSMenuItem?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -62,10 +61,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         item.button?.toolTip = "Who Sudo'd"
 
         let menu = NSMenu()
-        let status = NSMenuItem(title: "Starting monitor…", action: nil, keyEquivalent: "")
-        status.isEnabled = false
-        menu.addItem(status)
-
         let access = NSMenuItem(
             title: "Request Accessibility Access…",
             action: #selector(requestAccessibilityAccess),
@@ -81,12 +76,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         item.menu = menu
         statusItem = item
-        statusMenuItem = status
         accessMenuItem = access
     }
 
     private func updateStatus(_ status: AuthorizationMonitorStatus) {
-        statusMenuItem?.title = status.message
         accessMenuItem?.title = status.accessibilityTrusted
             ? "Accessibility: Allowed"
             : "Request Accessibility Access…"

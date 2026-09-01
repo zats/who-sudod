@@ -44,6 +44,9 @@ enum AccessibilityFocusReader {
     }
 
     static func isFrontmost(processID: pid_t) -> Bool? {
+        if let application = NSRunningApplication(processIdentifier: processID) {
+            return application.isActive
+        }
         guard isTrusted else {
             return nil
         }

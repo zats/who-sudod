@@ -140,7 +140,7 @@ final class AuthenticationEvidenceSelectionTests: XCTestCase {
             from: [
                 event(
                     pid: 200,
-                    at: firstSeenAt.addingTimeInterval(-4),
+                    at: firstSeenAt.addingTimeInterval(-5.001),
                     source: .localAuthentication
                 ),
                 event(
@@ -171,6 +171,42 @@ final class AuthenticationEvidenceSelectionTests: XCTestCase {
             firstSeenAt: firstSeenAt,
             now: firstSeenAt.addingTimeInterval(20),
             maximumLagTime: 3
+        )
+
+        XCTAssertTrue(ranked.isEmpty)
+    }
+
+    func testAllowsLocalAuthenticationEventBeforeDelayedPresentation() throws {
+        let firstSeenAt = Date(timeIntervalSince1970: 100)
+        let delayedPresentationEvent = event(
+            pid: 200,
+            at: firstSeenAt.addingTimeInterval(-4.5),
+            source: .localAuthentication
+        )
+
+        let selected = AuthenticationEvidenceSelection.rankedEvents(
+            from: [delayedPresentationEvent],
+            surfaceKind: .localAuthentication,
+            firstSeenAt: firstSeenAt,
+            now: firstSeenAt
+        ).first
+
+        XCTAssertEqual(try XCTUnwrap(selected).processID, 200)
+    }
+
+    func testSecurityAgentKeepsShorterDefaultLeadWindow() {
+        let firstSeenAt = Date(timeIntervalSince1970: 100)
+        let ranked = AuthenticationEvidenceSelection.rankedEvents(
+            from: [
+                event(
+                    pid: 200,
+                    at: firstSeenAt.addingTimeInterval(-3.001),
+                    source: .authorizationShell
+                )
+            ],
+            surfaceKind: .securityAgent,
+            firstSeenAt: firstSeenAt,
+            now: firstSeenAt
         )
 
         XCTAssertTrue(ranked.isEmpty)
