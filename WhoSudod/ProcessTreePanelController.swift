@@ -2,6 +2,16 @@ import AppKit
 import os
 import QuartzCore
 
+enum ProcessTableAnimationPolicy {
+    static func animatesContentChange(
+        panelIsPresented: Bool,
+        currentPromptSequence: Int,
+        nextPromptSequence: Int
+    ) -> Bool {
+        panelIsPresented && currentPromptSequence == nextPromptSequence
+    }
+}
+
 @MainActor
 final class ProcessTreePanelController: NSWindowController {
     private let content: CompanionContentView
@@ -58,9 +68,14 @@ final class ProcessTreePanelController: NSWindowController {
             return
         }
 
+        let animatesTableChange = ProcessTableAnimationPolicy.animatesContentChange(
+            panelIsPresented: isPresented,
+            currentPromptSequence: currentPromptSequence,
+            nextPromptSequence: promptSequence
+        )
         if snapshot != currentSnapshot {
             currentSnapshot = snapshot
-            content.update(snapshot: snapshot)
+            content.update(snapshot: snapshot, animated: animatesTableChange)
         }
         currentPromptSequence = promptSequence
         currentSurfaceKind = surfaceKind
@@ -401,8 +416,11 @@ final class CompanionContentView: NSView {
         fatalError("init(coder:) has not been implemented")
     }
 
-    func update(snapshot: AuthenticationProcessSnapshot) {
-        processTable.update(snapshot: snapshot)
+    func update(
+        snapshot: AuthenticationProcessSnapshot,
+        animated: Bool
+    ) {
+        processTable.update(snapshot: snapshot, animated: animated)
     }
 
     func setDisplayMode(_ mode: ProcessDisplayMode) {

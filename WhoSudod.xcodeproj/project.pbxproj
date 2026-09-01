@@ -69,7 +69,6 @@
 		9CDB62CC84A6D8431E0A910D /* AuthenticationWindowLocator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthenticationWindowLocator.swift; sourceTree = "<group>"; };
 		AB639B3A0B1076EE86B16FA2 /* WindowObservationStabilityTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WindowObservationStabilityTests.swift; sourceTree = "<group>"; };
 		B4C926162AFE6D8C8F5B1BED /* WhoSudodLiveRequester.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = WhoSudodLiveRequester.app; sourceTree = BUILT_PRODUCTS_DIR; };
-		BD73838D6B56512AA0CDE3F9 /* permiso */ = {isa = PBXFileReference; lastKnownFileType = folder; name = permiso; path = ../Libraries/permiso; sourceTree = SOURCE_ROOT; };
 		BEE55391F387DC45BEDC7FB2 /* ProcessTreePanelController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProcessTreePanelController.swift; sourceTree = "<group>"; };
 		C2A76BAFE23C034C3C5B153B /* AuthenticationProcessScanner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthenticationProcessScanner.swift; sourceTree = "<group>"; };
 		CC1F520B5224594A4BAB6C35 /* AuthenticationEventMonitorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthenticationEventMonitorTests.swift; sourceTree = "<group>"; };
@@ -92,7 +91,6 @@
 		05C111D314ABED6FD16A1126 = {
 			isa = PBXGroup;
 			children = (
-				8E2DD2F17F57C443187087B2 /* Packages */,
 				1B83BEFEC93D2E735994C783 /* WhoSudod */,
 				A552E85865F1123324475A16 /* WhoSudodLiveRequester */,
 				D48AA418813C6AA68FBB711B /* WhoSudodTests */,
@@ -119,14 +117,6 @@
 				978EB43B0AA18113CE20C738 /* WindowGeometry.swift */,
 			);
 			path = WhoSudod;
-			sourceTree = "<group>";
-		};
-		8E2DD2F17F57C443187087B2 /* Packages */ = {
-			isa = PBXGroup;
-			children = (
-				BD73838D6B56512AA0CDE3F9 /* permiso */,
-			);
-			name = Packages;
 			sourceTree = "<group>";
 		};
 		A552E85865F1123324475A16 /* WhoSudodLiveRequester */ = {
@@ -255,7 +245,7 @@
 			mainGroup = 05C111D314ABED6FD16A1126;
 			minimizedProjectReferenceProxies = 1;
 			packageReferences = (
-				691159CB736B1F61F657E0BC /* XCLocalSwiftPackageReference "../Libraries/permiso" */,
+				E984085E3DF06F7872802A8D /* XCRemoteSwiftPackageReference "permiso" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = CA4C8A66F6020F28E0358F7F /* Products */;
@@ -362,6 +352,8 @@
 				COMBINE_HIDPI_IMAGES = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_CFBundleDisplayName = "Who Sudo'd";
+				INFOPLIST_KEY_CFBundleShortVersionString = "$(MARKETING_VERSION)";
+				INFOPLIST_KEY_CFBundleVersion = "$(CURRENT_PROJECT_VERSION)";
 				INFOPLIST_KEY_LSUIElement = YES;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
@@ -409,6 +401,7 @@
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				CODE_SIGN_STYLE = Automatic;
 				COPY_PHASE_STRIP = NO;
+				CURRENT_PROJECT_VERSION = 1;
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
 				DEVELOPMENT_TEAM = 5KE88HWMKJ;
 				ENABLE_APP_SANDBOX = NO;
@@ -424,6 +417,7 @@
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
 				MACOSX_DEPLOYMENT_TARGET = 26.0;
+				MARKETING_VERSION = 1.0.0;
 				MTL_ENABLE_DEBUG_INFO = NO;
 				MTL_FAST_MATH = YES;
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -487,6 +481,7 @@
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				CODE_SIGN_STYLE = Automatic;
 				COPY_PHASE_STRIP = NO;
+				CURRENT_PROJECT_VERSION = 1;
 				DEBUG_INFORMATION_FORMAT = dwarf;
 				DEVELOPMENT_TEAM = 5KE88HWMKJ;
 				ENABLE_APP_SANDBOX = NO;
@@ -508,6 +503,7 @@
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
 				MACOSX_DEPLOYMENT_TARGET = 26.0;
+				MARKETING_VERSION = 1.0.0;
 				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
 				MTL_FAST_MATH = YES;
 				ONLY_ACTIVE_ARCH = YES;
@@ -526,6 +522,8 @@
 				COMBINE_HIDPI_IMAGES = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_CFBundleDisplayName = "Who Sudo'd";
+				INFOPLIST_KEY_CFBundleShortVersionString = "$(MARKETING_VERSION)";
+				INFOPLIST_KEY_CFBundleVersion = "$(CURRENT_PROJECT_VERSION)";
 				INFOPLIST_KEY_LSUIElement = YES;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
@@ -613,16 +611,21 @@
 		};
 /* End XCConfigurationList section */
 
-/* Begin XCLocalSwiftPackageReference section */
-		691159CB736B1F61F657E0BC /* XCLocalSwiftPackageReference "../Libraries/permiso" */ = {
-			isa = XCLocalSwiftPackageReference;
-			relativePath = ../Libraries/permiso;
+/* Begin XCRemoteSwiftPackageReference section */
+		E984085E3DF06F7872802A8D /* XCRemoteSwiftPackageReference "permiso" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/zats/permiso.git";
+			requirement = {
+				kind = revision;
+				revision = 713c8b70c650947dd349754f3720287a7c2320d0;
+			};
 		};
-/* End XCLocalSwiftPackageReference section */
+/* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
 		396420E933DA39865468A832 /* Permiso */ = {
 			isa = XCSwiftPackageProductDependency;
+			package = E984085E3DF06F7872802A8D /* XCRemoteSwiftPackageReference "permiso" */;
 			productName = Permiso;
 		};
 /* End XCSwiftPackageProductDependency section */

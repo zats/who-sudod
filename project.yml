@@ -8,7 +8,8 @@ options:
 
 packages:
   Permiso:
-    path: ../Libraries/permiso
+    url: https://github.com/zats/permiso.git
+    revision: 713c8b70c650947dd349754f3720287a7c2320d0
 
 settings:
   base:
@@ -17,6 +18,8 @@ settings:
     CODE_SIGN_STYLE: Automatic
     ENABLE_HARDENED_RUNTIME: YES
     ENABLE_APP_SANDBOX: NO
+    MARKETING_VERSION: 1.0.0
+    CURRENT_PROJECT_VERSION: 1
 
 targets:
   WhoSudod:
@@ -31,6 +34,8 @@ targets:
         PRODUCT_MODULE_NAME: WhoSudod
         PRODUCT_NAME: "Who Sudo'd"
         INFOPLIST_KEY_CFBundleDisplayName: "Who Sudo'd"
+        INFOPLIST_KEY_CFBundleShortVersionString: "$(MARKETING_VERSION)"
+        INFOPLIST_KEY_CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
         INFOPLIST_KEY_LSUIElement: YES
         GENERATE_INFOPLIST_FILE: YES
     dependencies:

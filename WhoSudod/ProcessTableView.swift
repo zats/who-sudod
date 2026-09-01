@@ -369,6 +369,7 @@ final class ProcessTableView: NSView, NSTableViewDataSource, NSTableViewDelegate
     private(set) var displayMode: ProcessDisplayMode
     private var currentSnapshot = AuthenticationProcessSnapshot.pending
     private var iconCache: [String: NSImage] = [:]
+    private let animationVisibilityOverride: Bool?
 #if DEBUG
     private var lastRenderingFailure: String?
 #endif
@@ -392,10 +393,12 @@ final class ProcessTableView: NSView, NSTableViewDataSource, NSTableViewDelegate
     init(
         frame frameRect: NSRect,
         tableView: NSTableView,
-        displayMode: ProcessDisplayMode
+        displayMode: ProcessDisplayMode,
+        animationVisibilityOverride: Bool? = nil
     ) {
         self.tableView = tableView
         self.displayMode = displayMode
+        self.animationVisibilityOverride = animationVisibilityOverride
         super.init(frame: frameRect)
         configure()
     }
@@ -405,9 +408,12 @@ final class ProcessTableView: NSView, NSTableViewDataSource, NSTableViewDelegate
         fatalError("init(coder:) has not been implemented")
     }
 
-    func update(snapshot: AuthenticationProcessSnapshot) {
+    func update(
+        snapshot: AuthenticationProcessSnapshot,
+        animated: Bool = true
+    ) {
         currentSnapshot = snapshot
-        rebuildRows(animated: true)
+        rebuildRows(animated: animated)
     }
 
     func setDisplayMode(_ mode: ProcessDisplayMode) {
@@ -432,8 +438,10 @@ final class ProcessTableView: NSView, NSTableViewDataSource, NSTableViewDelegate
             for: newRows,
             mode: displayMode
         )
+        let tableIsVisible = animationVisibilityOverride
+            ?? (tableView.window?.isVisible == true)
         guard animated,
-              tableView.window?.isVisible == true,
+              tableIsVisible,
               let transition = ProcessTableRowTransition(
                 from: rows,
                 to: newRows,

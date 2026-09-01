@@ -167,6 +167,120 @@ final class ProcessTableRowBuilderTests: XCTestCase {
         XCTAssertEqual(transition.reloads, IndexSet(integer: 0))
     }
 
+    func testPromptAnimationPolicyUsesOnlyTheSameVisiblePrompt() {
+        XCTAssertFalse(
+            ProcessTableAnimationPolicy.animatesContentChange(
+                panelIsPresented: false,
+                currentPromptSequence: 1,
+                nextPromptSequence: 1
+            )
+        )
+        XCTAssertTrue(
+            ProcessTableAnimationPolicy.animatesContentChange(
+                panelIsPresented: true,
+                currentPromptSequence: 1,
+                nextPromptSequence: 1
+            )
+        )
+        XCTAssertFalse(
+            ProcessTableAnimationPolicy.animatesContentChange(
+                panelIsPresented: true,
+                currentPromptSequence: 1,
+                nextPromptSequence: 2
+            )
+        )
+    }
+
+    @MainActor
+    func testVisibleSamePromptUpdateUsesNativeRowInsertion() {
+        let requester = process(
+            pid: 300,
+            parentPID: 0,
+            name: "sudo",
+            path: "/usr/bin/sudo"
+        )
+        let child = process(
+            pid: 301,
+            parentPID: 300,
+            name: "echo",
+            path: "/bin/echo"
+        )
+        let initial = snapshot(
+            records: [requester],
+            requester: requester,
+            requestKind: .sudo,
+            attribution: .heuristicSudo
+        )
+        let updated = snapshot(
+            records: [requester, child],
+            requester: requester,
+            requestKind: .sudo,
+            attribution: .heuristicSudo
+        )
+        let recordingTable = RecordingTableView()
+        let table = ProcessTableView(
+            frame: NSRect(x: 0, y: 0, width: 760, height: 240),
+            tableView: recordingTable,
+            displayMode: .fullTree,
+            animationVisibilityOverride: true
+        )
+
+        table.update(snapshot: initial, animated: false)
+        recordingTable.resetRecordedUpdates()
+
+        table.update(snapshot: updated, animated: true)
+
+        XCTAssertEqual(recordingTable.reloadDataCallCount, 0)
+        XCTAssertEqual(recordingTable.insertedRows, [IndexSet(integer: 1)])
+        XCTAssertTrue(recordingTable.removedRows.isEmpty)
+        XCTAssertEqual(table.presentationRows.map(\.process), ["sudo", "echo"])
+    }
+
+    @MainActor
+    func testVisibleNewPromptUpdateReloadsImmediately() {
+        let firstRequester = process(
+            pid: 300,
+            parentPID: 0,
+            name: "sudo",
+            path: "/usr/bin/sudo"
+        )
+        let secondRequester = process(
+            pid: 400,
+            parentPID: 0,
+            name: "security",
+            path: "/usr/bin/security"
+        )
+        let first = snapshot(
+            records: [firstRequester],
+            requester: firstRequester,
+            requestKind: .sudo,
+            attribution: .heuristicSudo
+        )
+        let second = snapshot(
+            records: [secondRequester],
+            requester: secondRequester,
+            requestKind: .authorization,
+            attribution: .authorizationLog
+        )
+        let recordingTable = RecordingTableView()
+        let table = ProcessTableView(
+            frame: NSRect(x: 0, y: 0, width: 760, height: 240),
+            tableView: recordingTable,
+            displayMode: .fullTree,
+            animationVisibilityOverride: true
+        )
+
+        table.update(snapshot: first, animated: false)
+        recordingTable.resetRecordedUpdates()
+
+        table.update(snapshot: second, animated: false)
+
+        XCTAssertEqual(recordingTable.reloadDataCallCount, 1)
+        XCTAssertTrue(recordingTable.insertedRows.isEmpty)
+        XCTAssertTrue(recordingTable.removedRows.isEmpty)
+        XCTAssertEqual(table.presentationRows.map(\.process), ["security"])
+    }
+
     func testPresentationRowsMatchVisibleTableStrings() {
         let snapshot = sudoSnapshot(
             processArguments: ["sudo", "-k", "/bin/echo", "who-sudod-child-check"]
@@ -1313,5 +1427,38 @@ private final class ClickedRowTableView: NSTableView {
 
     override var clickedRow: Int {
         testClickedRow
+    }
+}
+
+private final class RecordingTableView: NSTableView {
+    private(set) var reloadDataCallCount = 0
+    private(set) var insertedRows: [IndexSet] = []
+    private(set) var removedRows: [IndexSet] = []
+
+    override func reloadData() {
+        reloadDataCallCount += 1
+        super.reloadData()
+    }
+
+    override func insertRows(
+        at indexes: IndexSet,
+        withAnimation animationOptions: NSTableView.AnimationOptions = []
+    ) {
+        insertedRows.append(indexes)
+        super.insertRows(at: indexes, withAnimation: animationOptions)
+    }
+
+    override func removeRows(
+        at indexes: IndexSet,
+        withAnimation animationOptions: NSTableView.AnimationOptions = []
+    ) {
+        removedRows.append(indexes)
+        super.removeRows(at: indexes, withAnimation: animationOptions)
+    }
+
+    func resetRecordedUpdates() {
+        reloadDataCallCount = 0
+        insertedRows = []
+        removedRows = []
     }
 }
