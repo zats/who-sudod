@@ -168,4 +168,130 @@ final class AuthenticationWindowLocatorTests: XCTestCase {
             )
         )
     }
+
+    func testTreatsCoreGraphicsAndAccessibilityViewsOfSameWindowAsOnePrompt() {
+        let frame = CGRect(x: 100, y: 200, width: 260, height: 289)
+        let coreGraphics = authenticationWindow(
+            identity: .coreGraphics(44),
+            processID: 321,
+            frame: frame
+        )
+        let accessibility = authenticationWindow(
+            identity: .accessibility(processID: 321),
+            processID: 321,
+            frame: frame.offsetBy(dx: 1, dy: -1)
+        )
+
+        XCTAssertTrue(
+            AuthenticationWindowContinuity.representsSamePrompt(
+                coreGraphics,
+                accessibility
+            )
+        )
+    }
+
+    func testDoesNotMergeDifferentAuthenticationWindows() {
+        let frame = CGRect(x: 100, y: 200, width: 260, height: 289)
+        let first = authenticationWindow(
+            identity: .coreGraphics(44),
+            processID: 321,
+            frame: frame
+        )
+        let otherWindow = authenticationWindow(
+            identity: .coreGraphics(45),
+            processID: 321,
+            frame: frame
+        )
+        let otherProcess = authenticationWindow(
+            identity: .accessibility(processID: 654),
+            processID: 654,
+            frame: frame
+        )
+
+        XCTAssertFalse(
+            AuthenticationWindowContinuity.representsSamePrompt(first, otherWindow)
+        )
+        XCTAssertFalse(
+            AuthenticationWindowContinuity.representsSamePrompt(first, otherProcess)
+        )
+    }
+
+    func testAccessibilityFallbackUsesUniqueCoreGraphicsMatch() throws {
+        let frame = CGRect(x: 100, y: 200, width: 260, height: 289)
+        let coreGraphics = authenticationWindow(
+            identity: .coreGraphics(44),
+            processID: 321,
+            frame: frame
+        )
+        let accessibility = authenticationWindow(
+            identity: .accessibility(processID: 321),
+            processID: 321,
+            frame: frame.offsetBy(dx: 1, dy: -1)
+        )
+
+        XCTAssertEqual(
+            AuthenticationWindowAccessibilityFallback.resolve(
+                coreGraphicsCandidates: [coreGraphics],
+                accessibilityCandidate: accessibility
+            ),
+            coreGraphics
+        )
+    }
+
+    func testAccessibilityFallbackRejectsAmbiguousSameFrameWindows() {
+        let frame = CGRect(x: 100, y: 200, width: 260, height: 289)
+        let first = authenticationWindow(
+            identity: .coreGraphics(44),
+            processID: 321,
+            frame: frame
+        )
+        let second = authenticationWindow(
+            identity: .coreGraphics(45),
+            processID: 321,
+            frame: frame
+        )
+        let accessibility = authenticationWindow(
+            identity: .accessibility(processID: 321),
+            processID: 321,
+            frame: frame
+        )
+
+        XCTAssertNil(
+            AuthenticationWindowAccessibilityFallback.resolve(
+                coreGraphicsCandidates: [first, second],
+                accessibilityCandidate: accessibility
+            )
+        )
+    }
+
+    func testAccessibilityFallbackUsesAXOnlyWhenNoCoreGraphicsCandidateExists() {
+        let accessibility = authenticationWindow(
+            identity: .accessibility(processID: 321),
+            processID: 321,
+            frame: CGRect(x: 100, y: 200, width: 260, height: 289)
+        )
+
+        XCTAssertEqual(
+            AuthenticationWindowAccessibilityFallback.resolve(
+                coreGraphicsCandidates: [],
+                accessibilityCandidate: accessibility
+            ),
+            accessibility
+        )
+    }
+
+    private func authenticationWindow(
+        identity: AuthenticationWindowIdentity,
+        processID: pid_t,
+        frame: CGRect
+    ) -> AuthenticationWindowSnapshot {
+        AuthenticationWindowSnapshot(
+            identity: identity,
+            processID: processID,
+            surfaceKind: .localAuthentication,
+            coreGraphicsFrame: frame,
+            frame: frame,
+            visibleFrame: display.visibleFrame
+        )
+    }
 }

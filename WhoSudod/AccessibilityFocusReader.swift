@@ -8,6 +8,9 @@ enum AccessibilityWindowFocusResolver {
         main: Bool?,
         frontmost: Bool?
     ) -> Bool? {
+        if frameMatches, focused == true || main == true {
+            return true
+        }
         if frontmost == false {
             return false
         }

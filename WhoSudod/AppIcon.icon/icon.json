@@ -1,0 +1,123 @@
+{
+  "features" : [
+    "refractivity",
+    "specular-location"
+  ],
+  "fill" : {
+    "automatic-gradient" : "extended-gray:1.00000,1.00000"
+  },
+  "groups" : [
+    {
+      "layers" : [
+        {
+          "glass" : false,
+          "hidden" : false,
+          "image-name-specializations" : [
+            {
+              "value" : "exec-5aa73a2f-276a-4afb-885d-7552ffc8a100.png"
+            },
+            {
+              "appearance" : "dark",
+              "value" : "07-magnifier-dark.png"
+            }
+          ],
+          "name" : "Magnifier",
+          "position" : {
+            "scale" : 1,
+            "translation-in-points" : [
+              -59,
+              40
+            ]
+          }
+        }
+      ],
+      "name" : "Magnifier hardware",
+      "shadow" : {
+        "kind" : "neutral",
+        "opacity" : 0.5
+      },
+      "translucency" : {
+        "enabled" : true,
+        "value" : 0.3
+      }
+    },
+    {
+      "layers" : [
+        {
+          "blend-mode" : "normal",
+          "fill" : "none",
+          "hidden" : false,
+          "image-name" : "06-magnifier-lens-mask-user-size.svg",
+          "name" : "Lens mask",
+          "opacity-specializations" : [
+            {
+              "appearance" : "dark",
+              "value" : 0.72
+            }
+          ]
+        }
+      ],
+      "name" : "Lens",
+      "refractivity" : {
+        "depth" : 0.3251171875,
+        "enabled" : true,
+        "strength" : 0.2
+      },
+      "shadow" : {
+        "kind" : "neutral",
+        "opacity" : 0.5
+      },
+      "specular-specializations" : [
+        {
+          "appearance" : "dark",
+          "value" : "inside"
+        }
+      ],
+      "translucency-specializations" : [
+        {
+          "value" : {
+            "enabled" : true,
+            "value" : 0.65
+          }
+        },
+        {
+          "appearance" : "dark",
+          "value" : {
+            "enabled" : true,
+            "value" : 0.9
+          }
+        }
+      ]
+    },
+    {
+      "layers" : [
+        {
+          "glass" : false,
+          "image-name" : "Codex Image Aug 31, 2026, 08_21_03 PM.png",
+          "name" : "Fingerprint",
+          "position" : {
+            "scale" : 1,
+            "translation-in-points" : [
+              68,
+              40
+            ]
+          }
+        }
+      ],
+      "name" : "Artwork",
+      "shadow" : {
+        "kind" : "neutral",
+        "opacity" : 0.5
+      },
+      "translucency" : {
+        "enabled" : true,
+        "value" : 0.3
+      }
+    }
+  ],
+  "supported-platforms" : {
+    "squares" : [
+      "macOS"
+    ]
+  }
+}

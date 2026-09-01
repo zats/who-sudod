@@ -14,7 +14,12 @@
 		16144255C80A8D9CBE8D65CD /* AuthenticationProcessSnapshotTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = CF7358B92D94959808B90335 /* AuthenticationProcessSnapshotTests.swift */; };
 		2008085E923BBF10D0D4F9C8 /* AuthenticationWindowLocator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9CDB62CC84A6D8431E0A910D /* AuthenticationWindowLocator.swift */; };
 		3A3EF34CAE7A4A025386A212 /* AccessibilityFocusReader.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7402F3F7DAFF7508DD93C7A6 /* AccessibilityFocusReader.swift */; };
+		4BCDFADCBC1F09FD2D89CBCD /* AuthenticationPromptSessionStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 756DAA5B7B5A0A80B90C6B88 /* AuthenticationPromptSessionStore.swift */; };
+		4C3FF5F28ADAF3F73B535364 /* AppIcon.icon in Resources */ = {isa = PBXBuildFile; fileRef = 7E0AF401853AC58F0D513409 /* AppIcon.icon */; };
 		5738E768692F024C36E34D63 /* ApplicationLaunchContextTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 040151B002872CBB1C3786FA /* ApplicationLaunchContextTests.swift */; };
+		69A2AAC579C99451FA37A1CE /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = EF8643FDB55D741508F3E715 /* Assets.xcassets */; };
+		7B8216E39C273CC40FBBEE72 /* main.swift in Sources */ = {isa = PBXBuildFile; fileRef = 036E6175246BF819FE85C7C7 /* main.swift */; };
+		85A8FEEF928D06D75CD4CC8D /* LiveTreeDiagnostics.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0B9C27CCDE090E86D04986AB /* LiveTreeDiagnostics.swift */; };
 		98B58325AA0922D2CFF1F074 /* ProcessTreePanelController.swift in Sources */ = {isa = PBXBuildFile; fileRef = BEE55391F387DC45BEDC7FB2 /* ProcessTreePanelController.swift */; };
 		B4AB0A8A20C87F54598DC15C /* WindowObservationStabilityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB639B3A0B1076EE86B16FA2 /* WindowObservationStabilityTests.swift */; };
 		B7E7CAD4761303D0593E07D4 /* AuthenticationEvidenceSelectionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0BE450A04104BDB3CCA1B1AB /* AuthenticationEvidenceSelectionTests.swift */; };
@@ -25,6 +30,7 @@
 		CBE20761DAC82A496B439DB0 /* AuthenticationWindowLocatorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1033914E79AD40696F3B68AA /* AuthenticationWindowLocatorTests.swift */; };
 		CCC8C665392974DC629653C6 /* AccessibilityFocusReaderTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3C845FCD9FFA5C1EBC2BE31E /* AccessibilityFocusReaderTests.swift */; };
 		D3B162A064531277B39EFAD7 /* WindowGeometry.swift in Sources */ = {isa = PBXBuildFile; fileRef = 978EB43B0AA18113CE20C738 /* WindowGeometry.swift */; };
+		D709FC388C60FBB3BB97B778 /* AuthenticationPromptSessionStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3DA7BF1D62DE89E6C6B497EA /* AuthenticationPromptSessionStoreTests.swift */; };
 		E328417D39652F8BB1360F41 /* AuthenticationEventMonitorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC1F520B5224594A4BAB6C35 /* AuthenticationEventMonitorTests.swift */; };
 		E6D13A2D8A438D5F21B306A0 /* AuthenticationProcessScanner.swift in Sources */ = {isa = PBXBuildFile; fileRef = C2A76BAFE23C034C3C5B153B /* AuthenticationProcessScanner.swift */; };
 /* End PBXBuildFile section */
@@ -41,27 +47,34 @@
 
 /* Begin PBXFileReference section */
 		000D307ACBE1E25ECCF1171E /* AuthorizationPromptMonitor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthorizationPromptMonitor.swift; sourceTree = "<group>"; };
+		036E6175246BF819FE85C7C7 /* main.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = main.swift; sourceTree = "<group>"; };
 		040151B002872CBB1C3786FA /* ApplicationLaunchContextTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ApplicationLaunchContextTests.swift; sourceTree = "<group>"; };
 		042772388007744053E5285A /* Who Sudo'd.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "Who Sudo'd.app"; sourceTree = BUILT_PRODUCTS_DIR; };
+		0B9C27CCDE090E86D04986AB /* LiveTreeDiagnostics.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiveTreeDiagnostics.swift; sourceTree = "<group>"; };
 		0BE450A04104BDB3CCA1B1AB /* AuthenticationEvidenceSelectionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthenticationEvidenceSelectionTests.swift; sourceTree = "<group>"; };
 		1033914E79AD40696F3B68AA /* AuthenticationWindowLocatorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthenticationWindowLocatorTests.swift; sourceTree = "<group>"; };
 		1495716BC948BD4456C24B9E /* ProcessTableRowBuilderTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProcessTableRowBuilderTests.swift; sourceTree = "<group>"; };
 		33D05C2FE950BD1FDA0949CC /* Application.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Application.swift; sourceTree = "<group>"; };
 		3C845FCD9FFA5C1EBC2BE31E /* AccessibilityFocusReaderTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AccessibilityFocusReaderTests.swift; sourceTree = "<group>"; };
+		3DA7BF1D62DE89E6C6B497EA /* AuthenticationPromptSessionStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthenticationPromptSessionStoreTests.swift; sourceTree = "<group>"; };
 		4067EB3A3845A56403315B78 /* WhoSudodTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = WhoSudodTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		4539943B67AC5EE2C1527DA2 /* WindowGeometryTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WindowGeometryTests.swift; sourceTree = "<group>"; };
 		7402F3F7DAFF7508DD93C7A6 /* AccessibilityFocusReader.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AccessibilityFocusReader.swift; sourceTree = "<group>"; };
+		756DAA5B7B5A0A80B90C6B88 /* AuthenticationPromptSessionStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthenticationPromptSessionStore.swift; sourceTree = "<group>"; };
 		7A2C6E263210ACF5D96D7685 /* ProcessTableView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProcessTableView.swift; sourceTree = "<group>"; };
 		7B49257CC2AF98EC5663BF41 /* AuthenticationProcessSnapshot.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthenticationProcessSnapshot.swift; sourceTree = "<group>"; };
+		7E0AF401853AC58F0D513409 /* AppIcon.icon */ = {isa = PBXFileReference; lastKnownFileType = wrapper.icon; path = AppIcon.icon; sourceTree = "<group>"; };
 		851731E6EF8847DB480A56EF /* AuthenticationEventMonitor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthenticationEventMonitor.swift; sourceTree = "<group>"; };
 		978EB43B0AA18113CE20C738 /* WindowGeometry.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WindowGeometry.swift; sourceTree = "<group>"; };
 		9CDB62CC84A6D8431E0A910D /* AuthenticationWindowLocator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthenticationWindowLocator.swift; sourceTree = "<group>"; };
 		AB639B3A0B1076EE86B16FA2 /* WindowObservationStabilityTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WindowObservationStabilityTests.swift; sourceTree = "<group>"; };
+		B4C926162AFE6D8C8F5B1BED /* WhoSudodLiveRequester.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = WhoSudodLiveRequester.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		BD73838D6B56512AA0CDE3F9 /* permiso */ = {isa = PBXFileReference; lastKnownFileType = folder; name = permiso; path = ../Libraries/permiso; sourceTree = SOURCE_ROOT; };
 		BEE55391F387DC45BEDC7FB2 /* ProcessTreePanelController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProcessTreePanelController.swift; sourceTree = "<group>"; };
 		C2A76BAFE23C034C3C5B153B /* AuthenticationProcessScanner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthenticationProcessScanner.swift; sourceTree = "<group>"; };
 		CC1F520B5224594A4BAB6C35 /* AuthenticationEventMonitorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthenticationEventMonitorTests.swift; sourceTree = "<group>"; };
 		CF7358B92D94959808B90335 /* AuthenticationProcessSnapshotTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthenticationProcessSnapshotTests.swift; sourceTree = "<group>"; };
+		EF8643FDB55D741508F3E715 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -81,6 +94,7 @@
 			children = (
 				8E2DD2F17F57C443187087B2 /* Packages */,
 				1B83BEFEC93D2E735994C783 /* WhoSudod */,
+				A552E85865F1123324475A16 /* WhoSudodLiveRequester */,
 				D48AA418813C6AA68FBB711B /* WhoSudodTests */,
 				CA4C8A66F6020F28E0358F7F /* Products */,
 			);
@@ -90,12 +104,16 @@
 			isa = PBXGroup;
 			children = (
 				7402F3F7DAFF7508DD93C7A6 /* AccessibilityFocusReader.swift */,
+				7E0AF401853AC58F0D513409 /* AppIcon.icon */,
 				33D05C2FE950BD1FDA0949CC /* Application.swift */,
+				EF8643FDB55D741508F3E715 /* Assets.xcassets */,
 				851731E6EF8847DB480A56EF /* AuthenticationEventMonitor.swift */,
 				C2A76BAFE23C034C3C5B153B /* AuthenticationProcessScanner.swift */,
 				7B49257CC2AF98EC5663BF41 /* AuthenticationProcessSnapshot.swift */,
+				756DAA5B7B5A0A80B90C6B88 /* AuthenticationPromptSessionStore.swift */,
 				9CDB62CC84A6D8431E0A910D /* AuthenticationWindowLocator.swift */,
 				000D307ACBE1E25ECCF1171E /* AuthorizationPromptMonitor.swift */,
+				0B9C27CCDE090E86D04986AB /* LiveTreeDiagnostics.swift */,
 				7A2C6E263210ACF5D96D7685 /* ProcessTableView.swift */,
 				BEE55391F387DC45BEDC7FB2 /* ProcessTreePanelController.swift */,
 				978EB43B0AA18113CE20C738 /* WindowGeometry.swift */,
@@ -111,10 +129,19 @@
 			name = Packages;
 			sourceTree = "<group>";
 		};
+		A552E85865F1123324475A16 /* WhoSudodLiveRequester */ = {
+			isa = PBXGroup;
+			children = (
+				036E6175246BF819FE85C7C7 /* main.swift */,
+			);
+			path = WhoSudodLiveRequester;
+			sourceTree = "<group>";
+		};
 		CA4C8A66F6020F28E0358F7F /* Products */ = {
 			isa = PBXGroup;
 			children = (
 				042772388007744053E5285A /* Who Sudo'd.app */,
+				B4C926162AFE6D8C8F5B1BED /* WhoSudodLiveRequester.app */,
 				4067EB3A3845A56403315B78 /* WhoSudodTests.xctest */,
 			);
 			name = Products;
@@ -128,6 +155,7 @@
 				CC1F520B5224594A4BAB6C35 /* AuthenticationEventMonitorTests.swift */,
 				0BE450A04104BDB3CCA1B1AB /* AuthenticationEvidenceSelectionTests.swift */,
 				CF7358B92D94959808B90335 /* AuthenticationProcessSnapshotTests.swift */,
+				3DA7BF1D62DE89E6C6B497EA /* AuthenticationPromptSessionStoreTests.swift */,
 				1033914E79AD40696F3B68AA /* AuthenticationWindowLocatorTests.swift */,
 				1495716BC948BD4456C24B9E /* ProcessTableRowBuilderTests.swift */,
 				4539943B67AC5EE2C1527DA2 /* WindowGeometryTests.swift */,
@@ -139,6 +167,23 @@
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
+		A61CC443B0D81519C1E38D31 /* WhoSudodLiveRequester */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 8CC584746FFE0CAF18D485CA /* Build configuration list for PBXNativeTarget "WhoSudodLiveRequester" */;
+			buildPhases = (
+				CAFC92C7352915AA328F209B /* Sources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = WhoSudodLiveRequester;
+			packageProductDependencies = (
+			);
+			productName = WhoSudodLiveRequester;
+			productReference = B4C926162AFE6D8C8F5B1BED /* WhoSudodLiveRequester.app */;
+			productType = "com.apple.product-type.application";
+		};
 		E0E73CF8347D3304657089D6 /* WhoSudodTests */ = {
 			isa = PBXNativeTarget;
 			buildConfigurationList = 0685E367D14B8D0C39BF4B32 /* Build configuration list for PBXNativeTarget "WhoSudodTests" */;
@@ -162,6 +207,7 @@
 			buildConfigurationList = 903EAFB09B4DE8421EB6ADE5 /* Build configuration list for PBXNativeTarget "WhoSudod" */;
 			buildPhases = (
 				65F15E08EC731B36147EC2FF /* Sources */,
+				252220D2FF652BF0754BB2BE /* Resources */,
 				5636A1713C8E30DA30D1D8B1 /* Frameworks */,
 			);
 			buildRules = (
@@ -185,6 +231,10 @@
 				BuildIndependentTargetsInParallel = YES;
 				LastUpgradeCheck = 2700;
 				TargetAttributes = {
+					A61CC443B0D81519C1E38D31 = {
+						DevelopmentTeam = 5KE88HWMKJ;
+						ProvisioningStyle = Automatic;
+					};
 					E0E73CF8347D3304657089D6 = {
 						DevelopmentTeam = 5KE88HWMKJ;
 						ProvisioningStyle = Automatic;
@@ -213,10 +263,23 @@
 			projectRoot = "";
 			targets = (
 				F8466B555E3196D5F26B52A7 /* WhoSudod */,
+				A61CC443B0D81519C1E38D31 /* WhoSudodLiveRequester */,
 				E0E73CF8347D3304657089D6 /* WhoSudodTests */,
 			);
 		};
 /* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		252220D2FF652BF0754BB2BE /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				4C3FF5F28ADAF3F73B535364 /* AppIcon.icon in Resources */,
+				69A2AAC579C99451FA37A1CE /* Assets.xcassets in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
 		07C5A50AFDB8AFFD6BA74B8F /* Sources */ = {
@@ -228,6 +291,7 @@
 				E328417D39652F8BB1360F41 /* AuthenticationEventMonitorTests.swift in Sources */,
 				B7E7CAD4761303D0593E07D4 /* AuthenticationEvidenceSelectionTests.swift in Sources */,
 				16144255C80A8D9CBE8D65CD /* AuthenticationProcessSnapshotTests.swift in Sources */,
+				D709FC388C60FBB3BB97B778 /* AuthenticationPromptSessionStoreTests.swift in Sources */,
 				CBE20761DAC82A496B439DB0 /* AuthenticationWindowLocatorTests.swift in Sources */,
 				C3EF4812A71D7C816C0E69A3 /* ProcessTableRowBuilderTests.swift in Sources */,
 				019D4FEB78CE50DFCCDD8216 /* WindowGeometryTests.swift in Sources */,
@@ -244,11 +308,21 @@
 				157FB13FDA546B7B01FC80DD /* AuthenticationEventMonitor.swift in Sources */,
 				E6D13A2D8A438D5F21B306A0 /* AuthenticationProcessScanner.swift in Sources */,
 				B9C9F874CD660A2AC35C9C7D /* AuthenticationProcessSnapshot.swift in Sources */,
+				4BCDFADCBC1F09FD2D89CBCD /* AuthenticationPromptSessionStore.swift in Sources */,
 				2008085E923BBF10D0D4F9C8 /* AuthenticationWindowLocator.swift in Sources */,
 				C9EB5F92C9452F835DDA64A8 /* AuthorizationPromptMonitor.swift in Sources */,
+				85A8FEEF928D06D75CD4CC8D /* LiveTreeDiagnostics.swift in Sources */,
 				C65644626A6A1E7C5CC7E4D7 /* ProcessTableView.swift in Sources */,
 				98B58325AA0922D2CFF1F074 /* ProcessTreePanelController.swift in Sources */,
 				D3B162A064531277B39EFAD7 /* WindowGeometry.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		CAFC92C7352915AA328F209B /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				7B8216E39C273CC40FBBEE72 /* main.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -263,6 +337,24 @@
 /* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
+		055C74E76E7E3C583E5145DA /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				COMBINE_HIDPI_IMAGES = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CFBundleDisplayName = WhoSudodLiveRequester;
+				INFOPLIST_KEY_LSUIElement = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.zats.WhoSudodLiveRequester;
+				PRODUCT_NAME = WhoSudodLiveRequester;
+				SDKROOT = macosx;
+			};
+			name = Debug;
+		};
 		2C5EE640615C6F230B3974E7 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
@@ -339,6 +431,24 @@
 				SWIFT_COMPILATION_MODE = wholemodule;
 				SWIFT_OPTIMIZATION_LEVEL = "-O";
 				SWIFT_VERSION = 6.0;
+			};
+			name = Release;
+		};
+		AA8EF8129B1A094ADE4CD6CE /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				COMBINE_HIDPI_IMAGES = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CFBundleDisplayName = WhoSudodLiveRequester;
+				INFOPLIST_KEY_LSUIElement = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.zats.WhoSudodLiveRequester;
+				PRODUCT_NAME = WhoSudodLiveRequester;
+				SDKROOT = macosx;
 			};
 			name = Release;
 		};
@@ -470,6 +580,15 @@
 			buildConfigurations = (
 				FA9CDBAA922E73D56F6135D5 /* Debug */,
 				D7A3E5FDE052A3C99E3D3B6B /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		8CC584746FFE0CAF18D485CA /* Build configuration list for PBXNativeTarget "WhoSudodLiveRequester" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				055C74E76E7E3C583E5145DA /* Debug */,
+				AA8EF8129B1A094ADE4CD6CE /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Debug;

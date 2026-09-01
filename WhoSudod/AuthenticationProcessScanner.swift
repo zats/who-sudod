@@ -33,38 +33,44 @@ enum AuthenticationRequesterUserPolicy {
     }
 }
 
-actor AuthenticationProcessScanner {
-    private final class OutputAccumulator: @unchecked Sendable {
-        private let lock = NSLock()
-        private let maximumBytes: Int
-        private var storage = Data()
-        private(set) var exceededLimit = false
-
-        init(maximumBytes: Int) {
-            self.maximumBytes = maximumBytes
+enum AuthenticationEvidencePathMatcher {
+    static func matches(reportedPath: String, liveExecutablePath: String) -> Bool {
+        let reported = normalized(reportedPath)
+        let live = normalized(liveExecutablePath)
+        if reported == live {
+            return true
         }
-
-        func append(_ data: Data) {
-            lock.lock()
-            defer { lock.unlock() }
-            guard !exceededLimit else {
-                return
-            }
-            guard storage.count + data.count <= maximumBytes else {
-                exceededLimit = true
-                storage.removeAll(keepingCapacity: false)
-                return
-            }
-            storage.append(data)
+        let bundleURL = URL(fileURLWithPath: reported)
+        guard bundleURL.pathExtension == "app",
+              let executableURL = Bundle(url: bundleURL)?.executableURL else {
+            return false
         }
-
-        func snapshot() -> (data: Data, exceededLimit: Bool) {
-            lock.lock()
-            defer { lock.unlock() }
-            return (storage, exceededLimit)
-        }
+        return normalized(executableURL.path) == live
     }
 
+    private static func normalized(_ path: String) -> String {
+        URL(fileURLWithPath: path).resolvingSymlinksInPath().standardizedFileURL.path
+    }
+}
+
+enum ProcessCommandLineParser {
+    static func arguments(fromPSOutput data: Data) -> [String]? {
+        guard data.count <= 1_048_576,
+              let output = String(data: data, encoding: .utf8) else {
+            return nil
+        }
+        let arguments = output.split(whereSeparator: \.isWhitespace).map(String.init)
+        return arguments.isEmpty ? nil : arguments
+    }
+}
+
+enum AuthenticationAnchorPriority {
+    static func isAuthoritative(_ anchor: AuthenticationRequestAnchor) -> Bool {
+        anchor.attribution.isLogAttributed
+    }
+}
+
+actor AuthenticationProcessScanner {
     private struct KernelProcess {
         let pid: pid_t
         let parentPID: pid_t
@@ -79,8 +85,8 @@ actor AuthenticationProcessScanner {
         let attribution: AuthenticationAttribution
     }
 
-    private var commandLines: [ProcessIdentity: String] = [:]
-    private var commandLineAttempts: [ProcessIdentity: Int] = [:]
+    private var processArgumentsByIdentity: [ProcessIdentity: [String]] = [:]
+    private var processArgumentReadAttempts: [ProcessIdentity: Int] = [:]
 
     func snapshot(
         realUserID: uid_t = getuid(),
@@ -95,15 +101,18 @@ actor AuthenticationProcessScanner {
             return .unavailable
         }
 
-        pruneCommandLineCache(using: catalog)
+        pruneProcessArgumentCache(using: catalog)
 
         if let preferredAnchor,
-           let process = verifiedProcess(
-               identity: preferredAnchor.identity,
-               realUserID: realUserID,
-               attribution: preferredAnchor.attribution,
-               in: catalog
-           ) {
+           AuthenticationAnchorPriority.isAuthoritative(preferredAnchor) {
+            guard let process = verifiedProcess(
+                identity: preferredAnchor.identity,
+                realUserID: realUserID,
+                attribution: preferredAnchor.attribution,
+                in: catalog
+            ) else {
+                return .empty
+            }
             return await snapshot(
                 for: [
                     Requester(
@@ -114,9 +123,6 @@ actor AuthenticationProcessScanner {
                 ],
                 in: catalog
             )
-        }
-        if let preferredAnchor, preferredAnchor.attribution.isLogAttributed {
-            return .empty
         }
 
         for event in evidence {
@@ -140,6 +146,25 @@ actor AuthenticationProcessScanner {
                         process: process,
                         requestKind: process.name == "sudo" ? .sudo : requestKind,
                         attribution: attribution
+                    )
+                ],
+                in: catalog
+            )
+        }
+
+        if let preferredAnchor,
+           let process = verifiedProcess(
+               identity: preferredAnchor.identity,
+               realUserID: realUserID,
+               attribution: preferredAnchor.attribution,
+               in: catalog
+           ) {
+            return await snapshot(
+                for: [
+                    Requester(
+                        process: process,
+                        requestKind: preferredAnchor.requestKind,
+                        attribution: preferredAnchor.attribution
                     )
                 ],
                 in: catalog
@@ -188,7 +213,7 @@ actor AuthenticationProcessScanner {
         var relevantProcesses: [pid_t: ProcessRecord] = [:]
         var verifiedRequesters: [Requester] = []
         var inspectionWasIncomplete = false
-        for (index, requester) in requesters.enumerated() {
+        for requester in requesters {
             let process = requester.process
             guard isSameProcessImage(process) else {
                 continue
@@ -197,13 +222,13 @@ actor AuthenticationProcessScanner {
                 inspectionWasIncomplete = true
                 continue
             }
-            let commandLine = path == "/usr/bin/sudo" && index == 0
-                ? await commandLine(for: process)
+            let processArguments = path == "/usr/bin/sudo"
+                ? processArguments(for: process)
                 : nil
             let requesterRecord = record(
                 for: process,
                 executablePath: path,
-                commandLine: commandLine
+                processArguments: processArguments
             )
             relevantProcesses[requesterRecord.pid] = requesterRecord
             verifiedRequesters.append(requester)
@@ -273,20 +298,27 @@ actor AuthenticationProcessScanner {
             return nil
         }
         if let expectedPath = evidence.executablePath,
-           normalizedPath(expectedPath) != normalizedPath(livePath) {
+           !AuthenticationEvidencePathMatcher.matches(
+               reportedPath: expectedPath,
+               liveExecutablePath: livePath
+           ) {
             return nil
         }
         return process
     }
 
-    private func pruneCommandLineCache(using catalog: [pid_t: KernelProcess]) {
+    private func pruneProcessArgumentCache(using catalog: [pid_t: KernelProcess]) {
         let liveSudoIdentities = Set(
             catalog.values
                 .filter { $0.name == "sudo" }
                 .map(identity(for:))
         )
-        commandLines = commandLines.filter { liveSudoIdentities.contains($0.key) }
-        commandLineAttempts = commandLineAttempts.filter { liveSudoIdentities.contains($0.key) }
+        processArgumentsByIdentity = processArgumentsByIdentity.filter {
+            liveSudoIdentities.contains($0.key)
+        }
+        processArgumentReadAttempts = processArgumentReadAttempts.filter {
+            liveSudoIdentities.contains($0.key)
+        }
     }
 
     private func captureKernelProcesses() throws -> [pid_t: KernelProcess] {
@@ -401,7 +433,7 @@ actor AuthenticationProcessScanner {
     private func record(
         for process: KernelProcess,
         executablePath: String?,
-        commandLine: String? = nil
+        processArguments: [String]? = nil
     ) -> ProcessRecord {
         ProcessRecord(
             pid: process.pid,
@@ -410,7 +442,7 @@ actor AuthenticationProcessScanner {
             name: executablePath.map { URL(fileURLWithPath: $0).lastPathComponent } ?? process.name,
             executablePath: executablePath,
             startTime: process.startTime,
-            commandLine: commandLine
+            processArguments: processArguments
         )
     }
 
@@ -455,10 +487,6 @@ actor AuthenticationProcessScanner {
         return String(decoding: buffer.prefix { $0 != 0 }.map(UInt8.init(bitPattern:)), as: UTF8.self)
     }
 
-    private func normalizedPath(_ path: String) -> String {
-        URL(fileURLWithPath: path).resolvingSymlinksInPath().standardizedFileURL.path
-    }
-
     private func identity(for process: KernelProcess) -> ProcessIdentity {
         ProcessIdentity(pid: process.pid, startTime: process.startTime)
     }
@@ -470,78 +498,45 @@ actor AuthenticationProcessScanner {
         return lhs.pid > rhs.pid
     }
 
-    private func commandLine(for process: KernelProcess) async -> String? {
+    private func processArguments(for process: KernelProcess) -> [String]? {
         let identity = identity(for: process)
-        if let cached = commandLines[identity] {
+        if let cached = processArgumentsByIdentity[identity] {
             return cached
         }
-        guard commandLineAttempts[identity, default: 0] < 2 else {
+        guard processArgumentReadAttempts[identity, default: 0] < 2 else {
             return nil
         }
-        commandLineAttempts[identity, default: 0] += 1
+        processArgumentReadAttempts[identity, default: 0] += 1
 
-        let task = Process()
-        let output = Pipe()
-        let outputHandle = output.fileHandleForReading
-        let accumulator = OutputAccumulator(maximumBytes: 1_048_576)
-        outputHandle.readabilityHandler = { handle in
-            let data = handle.availableData
-            if data.isEmpty {
-                handle.readabilityHandler = nil
-            } else {
-                accumulator.append(data)
-            }
-        }
-        task.executableURL = URL(fileURLWithPath: "/bin/ps")
-        task.arguments = ["-ww", "-p", String(process.pid), "-o", "command="]
-        task.environment = ["LC_ALL": "C"]
-        task.standardOutput = output
-        task.standardError = FileHandle.nullDevice
-
-        do {
-            try task.run()
-        } catch {
-            return nil
-        }
-
-        let deadline = ProcessInfo.processInfo.systemUptime + 0.35
-        while task.isRunning,
-              !Task.isCancelled,
-              !accumulator.snapshot().exceededLimit,
-              ProcessInfo.processInfo.systemUptime < deadline {
-            try? await Task.sleep(nanoseconds: 5_000_000)
-        }
-        if task.isRunning {
-            task.terminate()
-            let terminationDeadline = ProcessInfo.processInfo.systemUptime + 0.10
-            while task.isRunning, ProcessInfo.processInfo.systemUptime < terminationDeadline {
-                try? await Task.sleep(nanoseconds: 5_000_000)
-            }
-        }
-        if task.isRunning {
-            kill(task.processIdentifier, SIGKILL)
-        }
-        task.waitUntilExit()
-        outputHandle.readabilityHandler = nil
-        accumulator.append(outputHandle.readDataToEndOfFile())
-        let capturedOutput = accumulator.snapshot()
-        guard task.terminationReason == .exit,
-              task.terminationStatus == 0,
-              !Task.isCancelled,
-              !capturedOutput.exceededLimit,
+        guard let arguments = capturedProcessArguments(processID: process.pid),
+              !arguments.isEmpty,
               isSameProcessImage(process),
               executablePath(for: process.pid) == "/usr/bin/sudo" else {
             return nil
         }
+        processArgumentsByIdentity[identity] = arguments
+        return arguments
+    }
 
-        let commandLine = String(decoding: capturedOutput.data, as: UTF8.self)
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !commandLine.isEmpty else {
+    private func capturedProcessArguments(processID: pid_t) -> [String]? {
+        let output = Pipe()
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/ps")
+        process.arguments = ["-ww", "-p", String(processID), "-o", "args="]
+        process.standardOutput = output
+        process.standardError = FileHandle.nullDevice
+        do {
+            try process.run()
+        } catch {
             return nil
         }
-        let sanitized = DisplayTextSanitizer.sanitize(commandLine)
-        commandLines[identity] = sanitized
-        return sanitized
+        let data = output.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        guard process.terminationReason == .exit,
+              process.terminationStatus == 0 else {
+            return nil
+        }
+        return ProcessCommandLineParser.arguments(fromPSOutput: data)
     }
 
     private func cString<T>(from tuple: T) -> String {

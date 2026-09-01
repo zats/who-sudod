@@ -30,6 +30,64 @@ struct WindowObservationStability: Equatable {
     }
 }
 
+enum AuthenticationWindowRecovery {
+    static func continuousReplacement(
+        for missingWindow: AuthenticationWindowSnapshot,
+        candidate: AuthenticationWindowSnapshot?
+    ) -> AuthenticationWindowSnapshot? {
+        guard let candidate else {
+            return nil
+        }
+        if candidate.identity == missingWindow.identity {
+            return candidate.processID == missingWindow.processID
+                && candidate.surfaceKind == missingWindow.surfaceKind
+                ? candidate
+                : nil
+        }
+        guard AuthenticationWindowContinuity.representsSamePrompt(
+            missingWindow,
+            candidate
+        ) else {
+            return nil
+        }
+        return candidate
+    }
+}
+
+enum AuthenticationWindowFocusTransition: Equatable {
+    case samePrompt(AuthenticationWindowSnapshot)
+    case differentPrompt(AuthenticationWindowSnapshot)
+    case noCandidate
+
+    static func resolve(
+        from current: AuthenticationWindowSnapshot,
+        to candidate: AuthenticationWindowSnapshot?
+    ) -> AuthenticationWindowFocusTransition {
+        guard let candidate else {
+            return .noCandidate
+        }
+        if candidate.identity == current.identity {
+            return candidate.processID == current.processID
+                && candidate.surfaceKind == current.surfaceKind
+                ? .samePrompt(candidate)
+                : .differentPrompt(candidate)
+        }
+        if AuthenticationWindowContinuity.representsSamePrompt(current, candidate) {
+            return .samePrompt(candidate)
+        }
+        return .differentPrompt(candidate)
+    }
+
+    var hidesCurrentPanel: Bool {
+        switch self {
+        case .samePrompt, .differentPrompt:
+            false
+        case .noCandidate:
+            true
+        }
+    }
+}
+
 enum AuthenticationEvidenceSelection {
     static func rankedEvents(
         from events: [AuthenticationClientEvent],
@@ -70,13 +128,14 @@ final class AuthorizationPromptMonitor: NSObject {
 
     private let logger = Logger(subsystem: "com.zats.WhoSudo", category: "AuthorizationMonitor")
     private let scanner = AuthenticationProcessScanner()
-    private let panel = ProcessTreePanelController()
+    private let panel: ProcessTreePanelController
     private let statusHandler: (AuthorizationMonitorStatus) -> Void
     private lazy var eventMonitor = AuthenticationEventMonitor { [weak self] event in
         self?.recordAuthenticationEvent(event)
     }
     private var timer: Timer?
     private var target: AuthenticationWindowSnapshot?
+    private var promptSessions = AuthenticationPromptSessionStore()
     private var targetFirstSeenAt: Date?
     private var recentEvents: [AuthenticationClientEvent] = []
     private var lastProcessSnapshot = AuthenticationProcessSnapshot.pending
@@ -84,11 +143,24 @@ final class AuthorizationPromptMonitor: NSObject {
     private var nextProcessScanTime: TimeInterval = 0
     private var processScanTask: Task<Void, Never>?
     private var processScanSequence = 0
+    private var promptSequence = 0
     private var observationStability = WindowObservationStability()
 
-    init(statusHandler: @escaping (AuthorizationMonitorStatus) -> Void) {
+    init(
+        displayMode: ProcessDisplayMode = .simple,
+        displayModeRequestHandler: @escaping (ProcessDisplayMode) -> Void = { _ in },
+        statusHandler: @escaping (AuthorizationMonitorStatus) -> Void
+    ) {
+        panel = ProcessTreePanelController(
+            displayMode: displayMode,
+            displayModeRequestHandler: displayModeRequestHandler
+        )
         self.statusHandler = statusHandler
         super.init()
+    }
+
+    func setDisplayMode(_ mode: ProcessDisplayMode) {
+        panel.setDisplayMode(mode)
     }
 
     func start() {
@@ -109,6 +181,7 @@ final class AuthorizationPromptMonitor: NSObject {
         let timer = Timer(timeInterval: 1.0 / 30.0, target: self, selector: #selector(tick), userInfo: nil, repeats: true)
         RunLoop.main.add(timer, forMode: .common)
         self.timer = timer
+        panel.recordReadiness(accessibilityTrusted: AccessibilityFocusReader.isTrusted)
         refresh(forceDiscovery: true)
     }
 
@@ -116,10 +189,14 @@ final class AuthorizationPromptMonitor: NSObject {
         timer?.invalidate()
         timer = nil
         cancelProcessScan()
+        promptSessions.removeAll()
         eventMonitor.stop()
         DistributedNotificationCenter.default().removeObserver(self)
         NSWorkspace.shared.notificationCenter.removeObserver(self)
-        panel.hide()
+        panel.hide(
+            promptPresent: false,
+            accessibilityTrusted: AccessibilityFocusReader.isTrusted
+        )
     }
 
     @objc
@@ -130,9 +207,6 @@ final class AuthorizationPromptMonitor: NSObject {
     @objc
     private func securityAgentDidShow(_ notification: Notification) {
         logger.notice("SecurityAgent UI notification received")
-        if target?.surfaceKind == .securityAgent {
-            resetAttribution(firstSeenAt: Date())
-        }
         refresh(forceDiscovery: true)
     }
 
@@ -146,34 +220,89 @@ final class AuthorizationPromptMonitor: NSObject {
             eventMonitor.stop()
             cancelProcessScan()
             target = nil
+            promptSessions.removeAll()
             targetFirstSeenAt = nil
             lastProcessSnapshot = .pending
             observationStability.reset()
-            panel.hide()
+            panel.hide(promptPresent: false, accessibilityTrusted: false)
+            panel.recordReadiness(accessibilityTrusted: false)
             report(isShowingPanel: false)
             return
         }
         eventMonitor.start()
 
         let now = ProcessInfo.processInfo.systemUptime
+        let observationDate = Date()
+        let visibleCoreGraphicsWindows = AuthenticationWindowLocator
+            .onScreenCoreGraphicsCandidates()
+        promptSessions.observeVisibleCoreGraphicsWindows(
+            visibleCoreGraphicsWindows,
+            at: observationDate
+        )
+        let frontmostCandidate = AuthenticationWindowLocator.frontmostCandidate(
+            from: visibleCoreGraphicsWindows
+        )
 
         if let currentTarget = target {
+            if let frontmostCandidate {
+                switch AuthenticationWindowFocusTransition.resolve(
+                    from: currentTarget,
+                    to: frontmostCandidate
+                ) {
+                case let .differentPrompt(candidate):
+                    activatePrompt(candidate, at: Date())
+                    logger.notice(
+                        "Authentication window switched to PID \(candidate.processID, privacy: .public)"
+                    )
+                    updatePanel(for: candidate, now: now)
+                    return
+                case let .samePrompt(candidate) where candidate.identity != currentTarget.identity:
+                    transferPromptSession(from: currentTarget, to: candidate, at: Date())
+                    logger.notice(
+                        "Authentication window representation switched for PID \(candidate.processID, privacy: .public)"
+                    )
+                    updatePanel(for: candidate, now: now)
+                    return
+                case .samePrompt, .noCandidate:
+                    break
+                }
+            }
+
             guard let current = AuthenticationWindowLocator.snapshot(identity: currentTarget.identity) else {
                 guard observationStability.recordMiss() else {
                     return
                 }
+                let candidate = frontmostCandidate
+                if let replacement = AuthenticationWindowRecovery.continuousReplacement(
+                    for: currentTarget,
+                    candidate: candidate
+                ) {
+                    transferPromptSession(from: currentTarget, to: replacement, at: Date())
+                    logger.notice(
+                        "Authentication window representation recovered for PID \(replacement.processID, privacy: .public)"
+                    )
+                    updatePanel(for: replacement, now: now)
+                    return
+                }
                 logger.notice("Authentication window closed")
                 cancelProcessScan()
+                promptSessions.remove(window: currentTarget)
                 target = nil
                 targetFirstSeenAt = nil
                 lastProcessSnapshot = .pending
                 observationStability.reset()
-                panel.hide()
+                if let candidate {
+                    activatePrompt(candidate, at: Date())
+                    updatePanel(for: candidate, now: now)
+                    return
+                }
+                panel.hide(promptPresent: false, accessibilityTrusted: true)
                 nextDiscoveryTime = 0
                 report(isShowingPanel: false)
                 return
             }
             target = current
+            promptSessions.touch(window: current, at: Date())
             updatePanel(for: current, now: now)
             return
         }
@@ -183,31 +312,42 @@ final class AuthorizationPromptMonitor: NSObject {
         }
         nextDiscoveryTime = now + 0.20
 
-        guard let candidate = AuthenticationWindowLocator.frontmostCandidate() else {
+        guard let candidate = frontmostCandidate else {
+            panel.recordReadiness(accessibilityTrusted: true)
             report(isShowingPanel: false)
             return
         }
 
-        target = candidate
-        observationStability.reset()
-        resetAttribution(firstSeenAt: Date())
+        activatePrompt(candidate, at: Date())
         logger.notice("Authentication window detected for PID \(candidate.processID, privacy: .public)")
         updatePanel(for: candidate, now: now)
     }
 
-    private func updatePanel(for window: AuthenticationWindowSnapshot, now: TimeInterval) {
+    private func updatePanel(
+        for window: AuthenticationWindowSnapshot,
+        now: TimeInterval,
+        allowsFocusRecovery: Bool = true
+    ) {
         switch isAuthenticationWindowFocused(window) {
         case true:
             observationStability.recordConfirmation()
         case false:
             observationStability.reset()
-            hideForLostFocus(window: window, now: now)
+            hideForLostFocus(
+                window: window,
+                now: now,
+                allowsFocusRecovery: allowsFocusRecovery
+            )
             return
         case nil:
             guard observationStability.recordMiss() else {
                 return
             }
-            hideForLostFocus(window: window, now: now)
+            hideForLostFocus(
+                window: window,
+                now: now,
+                allowsFocusRecovery: allowsFocusRecovery
+            )
             return
         }
 
@@ -218,6 +358,8 @@ final class AuthorizationPromptMonitor: NSObject {
 
         panel.show(
             snapshot: lastProcessSnapshot,
+            promptSequence: promptSequence,
+            surfaceKind: window.surfaceKind,
             authenticationFrame: window.frame,
             visibleFrame: window.visibleFrame
         )
@@ -226,14 +368,41 @@ final class AuthorizationPromptMonitor: NSObject {
 
     private func hideForLostFocus(
         window: AuthenticationWindowSnapshot,
-        now: TimeInterval
+        now: TimeInterval,
+        allowsFocusRecovery: Bool
     ) {
+        let transition = AuthenticationWindowFocusTransition.resolve(
+            from: window,
+            to: AuthenticationWindowLocator.frontmostCandidate()
+        )
+        if allowsFocusRecovery,
+           case let .samePrompt(candidate) = transition {
+            transferPromptSession(from: window, to: candidate, at: Date())
+            logger.notice(
+                "Authentication window representation switched for PID \(candidate.processID, privacy: .public)"
+            )
+            updatePanel(
+                for: candidate,
+                now: now,
+                allowsFocusRecovery: false
+            )
+            return
+        }
+
+        if case let .differentPrompt(candidate) = transition {
+            activatePrompt(candidate, at: Date())
+            logger.notice(
+                "Authentication window switched to PID \(candidate.processID, privacy: .public)"
+            )
+            updatePanel(for: candidate, now: now)
+            return
+        }
+
         let wasPresented = panel.isPresented
-        panel.hide()
+        panel.hide(promptPresent: true, accessibilityTrusted: true)
         if wasPresented {
             report(isShowingPanel: false)
         }
-        switchToFocusedCandidate(excluding: window.identity, now: now)
     }
 
     private func startProcessScan(for window: AuthenticationWindowSnapshot) {
@@ -246,10 +415,7 @@ final class AuthorizationPromptMonitor: NSObject {
             firstSeenAt: firstSeenAt,
             now: Date()
         )
-        let currentAnchor = lastProcessSnapshot.candidates.first?.anchor
-        let preferredAnchor = evidence.isEmpty || currentAnchor?.attribution.isLogAttributed == true
-            ? currentAnchor
-            : nil
+        let preferredAnchor = lastProcessSnapshot.candidates.first?.anchor
         processScanTask = Task { [weak self, scanner] in
             let newSnapshot = await scanner.snapshot(
                 preferredAnchor: preferredAnchor,
@@ -274,25 +440,13 @@ final class AuthorizationPromptMonitor: NSObject {
                     "Process snapshot has \(newSnapshot.candidates.count, privacy: .public) requester candidate(s)"
                 )
                 self.lastProcessSnapshot = refreshedSnapshot
+                self.promptSessions.update(
+                    window: window,
+                    processSnapshot: refreshedSnapshot,
+                    at: Date()
+                )
             }
         }
-    }
-
-    private func switchToFocusedCandidate(
-        excluding identity: AuthenticationWindowIdentity,
-        now: TimeInterval
-    ) {
-        guard let candidate = AuthenticationWindowLocator.frontmostCandidate(),
-              candidate.identity != identity else {
-            return
-        }
-        target = candidate
-        observationStability.reset()
-        resetAttribution(firstSeenAt: Date())
-        logger.notice(
-            "Authentication window switched to PID \(candidate.processID, privacy: .public)"
-        )
-        updatePanel(for: candidate, now: now)
     }
 
     private func isAuthenticationWindowFocused(
@@ -313,9 +467,6 @@ final class AuthorizationPromptMonitor: NSObject {
     }
 
     private func recordAuthenticationEvent(_ event: AuthenticationClientEvent) {
-        recentEvents.removeAll { existing in
-            existing.processID == event.processID && existing.source == event.source
-        }
         recentEvents.append(event)
         let cutoff = event.receivedAt.addingTimeInterval(-10)
         recentEvents.removeAll { $0.receivedAt < cutoff }
@@ -325,11 +476,37 @@ final class AuthorizationPromptMonitor: NSObject {
         nextProcessScanTime = 0
     }
 
-    private func resetAttribution(firstSeenAt: Date) {
+    private func activatePrompt(
+        _ window: AuthenticationWindowSnapshot,
+        at date: Date
+    ) {
         cancelProcessScan()
-        targetFirstSeenAt = firstSeenAt
-        lastProcessSnapshot = .pending
+        let session = promptSessions.activate(window: window, at: date)
+        target = window
+        targetFirstSeenAt = session.firstSeenAt
+        promptSequence = session.promptSequence
+        lastProcessSnapshot = session.processSnapshot
         nextProcessScanTime = 0
+        observationStability.reset()
+    }
+
+    private func transferPromptSession(
+        from oldWindow: AuthenticationWindowSnapshot,
+        to newWindow: AuthenticationWindowSnapshot,
+        at date: Date
+    ) {
+        cancelProcessScan()
+        let session = promptSessions.transfer(
+            from: oldWindow,
+            to: newWindow,
+            at: date
+        )
+        target = newWindow
+        targetFirstSeenAt = session.firstSeenAt
+        promptSequence = session.promptSequence
+        lastProcessSnapshot = session.processSnapshot
+        nextProcessScanTime = 0
+        observationStability.reset()
     }
 
     private func cancelProcessScan() {

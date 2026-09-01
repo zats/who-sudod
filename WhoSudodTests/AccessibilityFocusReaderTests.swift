@@ -62,10 +62,22 @@ final class AccessibilityFocusReaderTests: XCTestCase {
         )
     }
 
-    func testWindowIsInactiveWhenPresenterIsNotFrontmost() {
+    func testMatchingMainSecureWindowStaysActiveWhenPresenterReportsNotFrontmost() {
         XCTAssertEqual(
             AccessibilityWindowFocusResolver.resolve(
                 frameMatches: true,
+                focused: true,
+                main: true,
+                frontmost: false
+            ),
+            true
+        )
+    }
+
+    func testMismatchedWindowIsInactiveWhenPresenterIsNotFrontmost() {
+        XCTAssertEqual(
+            AccessibilityWindowFocusResolver.resolve(
+                frameMatches: false,
                 focused: true,
                 main: true,
                 frontmost: false

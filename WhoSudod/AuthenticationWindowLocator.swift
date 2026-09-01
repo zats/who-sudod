@@ -2,12 +2,12 @@ import AppKit
 import CoreGraphics
 import Darwin
 
-enum AuthenticationSurfaceKind: Equatable, Sendable {
+enum AuthenticationSurfaceKind: Hashable, Sendable {
     case securityAgent
     case localAuthentication
 }
 
-enum AuthenticationWindowIdentity: Equatable, Sendable {
+enum AuthenticationWindowIdentity: Hashable, Sendable {
     case coreGraphics(CGWindowID)
     case accessibility(processID: pid_t)
 }
@@ -19,6 +19,67 @@ struct AuthenticationWindowSnapshot: Equatable {
     let coreGraphicsFrame: CGRect
     let frame: CGRect
     let visibleFrame: CGRect
+}
+
+enum AuthenticationWindowContinuity {
+    static func representsSamePrompt(
+        _ lhs: AuthenticationWindowSnapshot,
+        _ rhs: AuthenticationWindowSnapshot,
+        frameTolerance: CGFloat = 8
+    ) -> Bool {
+        guard usesDifferentIdentitySources(lhs.identity, rhs.identity) else {
+            return false
+        }
+        return matchesPresenterAndFrame(lhs, rhs, frameTolerance: frameTolerance)
+    }
+
+    static func matchesPresenterAndFrame(
+        _ lhs: AuthenticationWindowSnapshot,
+        _ rhs: AuthenticationWindowSnapshot,
+        frameTolerance: CGFloat = 8
+    ) -> Bool {
+        guard lhs.processID == rhs.processID,
+              lhs.surfaceKind == rhs.surfaceKind else {
+            return false
+        }
+        return abs(lhs.coreGraphicsFrame.minX - rhs.coreGraphicsFrame.minX) <= frameTolerance
+            && abs(lhs.coreGraphicsFrame.minY - rhs.coreGraphicsFrame.minY) <= frameTolerance
+            && abs(lhs.coreGraphicsFrame.width - rhs.coreGraphicsFrame.width) <= frameTolerance
+            && abs(lhs.coreGraphicsFrame.height - rhs.coreGraphicsFrame.height) <= frameTolerance
+    }
+
+    private static func usesDifferentIdentitySources(
+        _ lhs: AuthenticationWindowIdentity,
+        _ rhs: AuthenticationWindowIdentity
+    ) -> Bool {
+        switch (lhs, rhs) {
+        case (.coreGraphics, .accessibility), (.accessibility, .coreGraphics):
+            true
+        default:
+            false
+        }
+    }
+}
+
+enum AuthenticationWindowAccessibilityFallback {
+    static func resolve(
+        coreGraphicsCandidates: [AuthenticationWindowSnapshot],
+        accessibilityCandidate: AuthenticationWindowSnapshot?
+    ) -> AuthenticationWindowSnapshot? {
+        guard let accessibilityCandidate else {
+            return nil
+        }
+        let matches = coreGraphicsCandidates.filter {
+            AuthenticationWindowContinuity.matchesPresenterAndFrame(
+                $0,
+                accessibilityCandidate
+            )
+        }
+        if matches.count == 1 {
+            return matches[0]
+        }
+        return coreGraphicsCandidates.isEmpty ? accessibilityCandidate : nil
+    }
 }
 
 enum AuthenticationWindowSnapshotFactory {
@@ -87,16 +148,26 @@ enum AuthenticationPresenterMatcher {
 
 @MainActor
 enum AuthenticationWindowLocator {
-    static func frontmostCandidate() -> AuthenticationWindowSnapshot? {
+    static func onScreenCoreGraphicsCandidates() -> [AuthenticationWindowSnapshot] {
         let windowInfo = CGWindowListCopyWindowInfo(
             [.optionOnScreenOnly, .excludeDesktopElements],
             .zero
         ) as? [[String: Any]] ?? []
+        return snapshots(from: windowInfo)
+    }
 
-        if let candidate = snapshots(from: windowInfo).first(where: isFocused) {
+    static func frontmostCandidate(
+        from coreGraphicsCandidates: [AuthenticationWindowSnapshot]? = nil
+    ) -> AuthenticationWindowSnapshot? {
+        let candidates = coreGraphicsCandidates ?? onScreenCoreGraphicsCandidates()
+
+        if let candidate = candidates.first(where: isFocused) {
             return candidate
         }
-        return accessibilityCandidate()
+        return AuthenticationWindowAccessibilityFallback.resolve(
+            coreGraphicsCandidates: candidates,
+            accessibilityCandidate: accessibilityCandidate()
+        )
     }
 
     static func snapshot(identity: AuthenticationWindowIdentity) -> AuthenticationWindowSnapshot? {

@@ -21,23 +21,27 @@ enum SudoInvocationParser {
         "--validate",
         "--version"
     ]
+    private static let shellModeLongOptions: Set<String> = [
+        "--login",
+        "--shell"
+    ]
     private static let shortOptionsWithArguments: Set<Character> = [
         "C", "D", "g", "h", "p", "R", "T", "U", "u"
     ]
     private static let nonExecutingShortOptions: Set<Character> = [
         "e", "K", "l", "V", "v"
     ]
+    private static let shellModeShortOptions: Set<Character> = ["i", "s"]
 
-    static func command(from commandLine: String) -> String? {
-        var tokens = commandLine.split(whereSeparator: { $0.isWhitespace }).map(String.init)
-        guard !tokens.isEmpty else {
+    static func command(from processArguments: [String]) -> RequestedCommand? {
+        guard let invocation = processArguments.first,
+              URL(fileURLWithPath: invocation).lastPathComponent != "sudoedit" else {
             return nil
         }
-        tokens.removeFirst()
 
-        var index = 0
-        while index < tokens.count {
-            let token = tokens[index]
+        var index = 1
+        while index < processArguments.count {
+            let token = processArguments[index]
             if token == "--" {
                 index += 1
                 break
@@ -55,7 +59,13 @@ enum SudoInvocationParser {
                 if nonExecutingLongOptions.contains(option) {
                     return nil
                 }
+                if shellModeLongOptions.contains(option) {
+                    return nil
+                }
                 if longOptionsWithArguments.contains(option), !token.contains("=") {
+                    guard processArguments.indices.contains(index + 1) else {
+                        return nil
+                    }
                     index += 2
                 } else {
                     index += 1
@@ -64,25 +74,44 @@ enum SudoInvocationParser {
             }
 
             let flags = Array(token.dropFirst())
-            if flags.contains(where: nonExecutingShortOptions.contains) {
-                return nil
+            var consumesNextArgument = false
+            for (flagIndex, flag) in flags.enumerated() {
+                if nonExecutingShortOptions.contains(flag) {
+                    return nil
+                }
+                if shellModeShortOptions.contains(flag) {
+                    return nil
+                }
+                guard shortOptionsWithArguments.contains(flag) else {
+                    continue
+                }
+
+                let hasAttachedArgument = flagIndex < flags.index(before: flags.endIndex)
+                consumesNextArgument = !hasAttachedArgument
+                break
             }
-            if let argumentOptionIndex = flags.firstIndex(
-                where: shortOptionsWithArguments.contains
-            ), argumentOptionIndex == flags.index(before: flags.endIndex) {
+            if consumesNextArgument {
+                guard processArguments.indices.contains(index + 1) else {
+                    return nil
+                }
                 index += 2
             } else {
                 index += 1
             }
         }
 
-        while index < tokens.count, isEnvironmentAssignment(tokens[index]) {
+        while index < processArguments.count,
+              isEnvironmentAssignment(processArguments[index]) {
             index += 1
         }
-        guard index < tokens.count else {
+        guard index < processArguments.count,
+              !processArguments[index].isEmpty else {
             return nil
         }
-        return tokens[index...].joined(separator: " ")
+        return RequestedCommand(
+            executable: processArguments[index],
+            arguments: Array(processArguments.dropFirst(index + 1))
+        )
     }
 
     private static func isEnvironmentAssignment(_ token: String) -> Bool {
@@ -95,6 +124,28 @@ enum SudoInvocationParser {
             return false
         }
         return name.dropFirst().allSatisfy { $0 == "_" || $0.isLetter || $0.isNumber }
+    }
+}
+
+struct RequestedCommand: Hashable, Sendable {
+    let executable: String
+    let arguments: [String]
+
+    var displayText: String {
+        ([executable] + arguments)
+            .map(Self.displayArgument)
+            .joined(separator: " ")
+    }
+
+    private static func displayArgument(_ argument: String) -> String {
+        let unquotedCharacters = CharacterSet.alphanumerics.union(
+            CharacterSet(charactersIn: "_@%+=:,./-")
+        )
+        if !argument.isEmpty,
+           argument.unicodeScalars.allSatisfy(unquotedCharacters.contains) {
+            return argument
+        }
+        return "'\(argument.replacingOccurrences(of: "'", with: "'\\''"))'"
     }
 }
 
@@ -129,7 +180,7 @@ struct ProcessRecord: Hashable, Sendable {
     let name: String
     let executablePath: String?
     let startTime: ProcessStartTime
-    let commandLine: String?
+    let processArguments: [String]?
 
     init(
         pid: pid_t,
@@ -138,7 +189,7 @@ struct ProcessRecord: Hashable, Sendable {
         name: String,
         executablePath: String?,
         startTime: ProcessStartTime,
-        commandLine: String? = nil
+        processArguments: [String]? = nil
     ) {
         self.pid = pid
         self.parentPID = parentPID
@@ -146,16 +197,15 @@ struct ProcessRecord: Hashable, Sendable {
         self.name = name
         self.executablePath = executablePath
         self.startTime = startTime
-        self.commandLine = commandLine
+        self.processArguments = processArguments
     }
 
-    var requestedCommand: String? {
+    var requestedCommand: RequestedCommand? {
         guard executablePath == "/usr/bin/sudo",
-              let text = commandLine?.trimmingCharacters(in: .whitespacesAndNewlines),
-              !text.isEmpty else {
+              let processArguments else {
             return nil
         }
-        return SudoInvocationParser.command(from: text)
+        return SudoInvocationParser.command(from: processArguments)
     }
 
     var identity: ProcessIdentity {

@@ -50,3 +50,17 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.zats.WhoSudodTests
         GENERATE_INFOPLIST_FILE: YES
+
+  WhoSudodLiveRequester:
+    type: application
+    platform: macOS
+    productName: WhoSudodLiveRequester
+    sources:
+      - path: WhoSudodLiveRequester
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.zats.WhoSudodLiveRequester
+        PRODUCT_NAME: WhoSudodLiveRequester
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_CFBundleDisplayName: WhoSudodLiveRequester
+        INFOPLIST_KEY_LSUIElement: YES

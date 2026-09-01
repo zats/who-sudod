@@ -25,6 +25,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var monitor: AuthorizationPromptMonitor?
     private var statusItem: NSStatusItem?
     private var accessMenuItem: NSMenuItem?
+    private var displayMode = ProcessDisplayMode.initial()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         guard ApplicationLaunchContext.shouldStartMonitor(
@@ -35,9 +36,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.setActivationPolicy(.accessory)
         configureStatusItem()
 
-        let monitor = AuthorizationPromptMonitor { [weak self] status in
-            self?.updateStatus(status)
-        }
+        let monitor = AuthorizationPromptMonitor(
+            displayMode: displayMode,
+            displayModeRequestHandler: { [weak self] mode in
+                self?.setDisplayMode(mode)
+            },
+            statusHandler: { [weak self] status in
+                self?.updateStatus(status)
+            }
+        )
         self.monitor = monitor
         monitor.start()
 
@@ -54,10 +61,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func configureStatusItem() {
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
-        item.button?.image = NSImage(
-            systemSymbolName: "person.badge.key.fill",
-            accessibilityDescription: "Who Sudo'd"
-        )
+        let statusImage = NSImage(named: "StatusFingerprint")
+        statusImage?.isTemplate = true
+        statusImage?.size = NSSize(width: 18, height: 18)
+        statusImage?.accessibilityDescription = "Who Sudo'd"
+        item.button?.image = statusImage
         item.button?.toolTip = "Who Sudo'd"
 
         let menu = NSMenu()
@@ -84,7 +92,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             ? "Accessibility: Allowed"
             : "Request Accessibility Access…"
         accessMenuItem?.isEnabled = !status.accessibilityTrusted
-        statusItem?.button?.contentTintColor = status.isShowingPanel ? .systemGreen : nil
         if status.accessibilityTrusted {
             PermisoAssistant.shared.dismiss()
         }
@@ -100,6 +107,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
         PermisoAssistant.shared.present(panel: .accessibility)
+    }
+
+    private func setDisplayMode(_ mode: ProcessDisplayMode) {
+        displayMode = mode
+        UserDefaults.standard.set(mode.rawValue, forKey: ProcessDisplayMode.defaultsKey)
+        monitor?.setDisplayMode(mode)
     }
 
     @objc

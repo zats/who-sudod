@@ -1,3 +1,4 @@
+import AppKit
 import XCTest
 @testable import WhoSudod
 
@@ -12,5 +13,13 @@ final class ApplicationLaunchContextTests: XCTestCase {
                 environment: ["XCTestConfigurationFilePath": "/tmp/test.xctestconfiguration"]
             )
         )
+    }
+
+    @MainActor
+    func testStatusFingerprintIsATemplateImage() throws {
+        let image = try XCTUnwrap(NSImage(named: "StatusFingerprint"))
+
+        XCTAssertTrue(image.isTemplate)
+        XCTAssertFalse(image.representations.isEmpty)
     }
 }
