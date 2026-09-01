@@ -14,7 +14,7 @@ final class AuthenticationEvidenceSelectionTests: XCTestCase {
         let authorization = event(
             pid: 300,
             at: firstSeenAt.addingTimeInterval(-2),
-            source: .authorizationShell
+            source: .authorization
         )
 
         let selected = AuthenticationEvidenceSelection.rankedEvents(
@@ -25,7 +25,7 @@ final class AuthenticationEvidenceSelectionTests: XCTestCase {
         ).first
 
         XCTAssertEqual(try XCTUnwrap(selected).processID, 300)
-        XCTAssertEqual(selected?.source, .authorizationShell)
+        XCTAssertEqual(selected?.source, .authorization)
     }
 
     func testLocalAuthenticationSurfaceUsesOnlyLocalAuthenticationEvidence() throws {
@@ -33,7 +33,7 @@ final class AuthenticationEvidenceSelectionTests: XCTestCase {
         let authorization = event(
             pid: 300,
             at: firstSeenAt,
-            source: .authorizationShell
+            source: .authorization
         )
         let localAuthentication = event(
             pid: 200,
@@ -111,12 +111,12 @@ final class AuthenticationEvidenceSelectionTests: XCTestCase {
         XCTAssertEqual(try XCTUnwrap(selected).processID, 300)
     }
 
-    func testSecurityAgentKeepsLocalAuthenticationAsFallbackEvidence() {
+    func testSecurityAgentRejectsLocalAuthenticationEvidence() {
         let firstSeenAt = Date(timeIntervalSince1970: 100)
         let authorization = event(
             pid: 300,
             at: firstSeenAt.addingTimeInterval(-2),
-            source: .authorizationShell
+            source: .authorization
         )
         let localAuthentication = event(
             pid: 200,
@@ -131,7 +131,7 @@ final class AuthenticationEvidenceSelectionTests: XCTestCase {
             now: firstSeenAt.addingTimeInterval(1)
         )
 
-        XCTAssertEqual(ranked.map(\.processID), [300, 200])
+        XCTAssertEqual(ranked.map(\.processID), [300])
     }
 
     func testReturnsNoEvidenceWhenAllEventsAreStaleOrFuture() {
@@ -201,7 +201,7 @@ final class AuthenticationEvidenceSelectionTests: XCTestCase {
                 event(
                     pid: 200,
                     at: firstSeenAt.addingTimeInterval(-3.001),
-                    source: .authorizationShell
+                    source: .authorization
                 )
             ],
             surfaceKind: .securityAgent,

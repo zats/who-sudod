@@ -3,6 +3,59 @@ import XCTest
 @testable import WhoSudod
 
 final class AuthenticationProcessSnapshotTests: XCTestCase {
+    func testRequesterUserPolicyAllowsRootAuthorizationLogRequester() {
+        XCTAssertTrue(
+            AuthenticationRequesterUserPolicy.allows(
+                realUserID: 0,
+                signedInUserID: 501,
+                attribution: .authorizationLog
+            )
+        )
+    }
+
+    func testRequesterUserPolicyRejectsRootForOtherAttribution() {
+        XCTAssertFalse(
+            AuthenticationRequesterUserPolicy.allows(
+                realUserID: 0,
+                signedInUserID: 501,
+                attribution: .localAuthenticationLog
+            )
+        )
+        XCTAssertFalse(
+            AuthenticationRequesterUserPolicy.allows(
+                realUserID: 0,
+                signedInUserID: 501,
+                attribution: .heuristicSudo
+            )
+        )
+    }
+
+    func testRequesterUserPolicyAllowsSignedInUserForEveryAttribution() {
+        for attribution in [
+            AuthenticationAttribution.authorizationLog,
+            .localAuthenticationLog,
+            .heuristicSudo
+        ] {
+            XCTAssertTrue(
+                AuthenticationRequesterUserPolicy.allows(
+                    realUserID: 501,
+                    signedInUserID: 501,
+                    attribution: attribution
+                )
+            )
+        }
+    }
+
+    func testRequesterUserPolicyRejectsDifferentNonRootUser() {
+        XCTAssertFalse(
+            AuthenticationRequesterUserPolicy.allows(
+                realUserID: 502,
+                signedInUserID: 501,
+                attribution: .authorizationLog
+            )
+        )
+    }
+
     func testBuildsObservedLocalAuthenticationAncestry() throws {
         let helper = record(
             pid: 300,

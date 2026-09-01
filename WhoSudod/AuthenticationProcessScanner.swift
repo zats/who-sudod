@@ -22,6 +22,17 @@ enum DisplayTextSanitizer {
     }
 }
 
+enum AuthenticationRequesterUserPolicy {
+    static func allows(
+        realUserID: uid_t,
+        signedInUserID: uid_t,
+        attribution: AuthenticationAttribution
+    ) -> Bool {
+        realUserID == signedInUserID
+            || (realUserID == 0 && attribution == .authorizationLog)
+    }
+}
+
 actor AuthenticationProcessScanner {
     private final class OutputAccumulator: @unchecked Sendable {
         private let lock = NSLock()
@@ -90,6 +101,7 @@ actor AuthenticationProcessScanner {
            let process = verifiedProcess(
                identity: preferredAnchor.identity,
                realUserID: realUserID,
+               attribution: preferredAnchor.attribution,
                in: catalog
            ) {
             return await snapshot(
@@ -108,9 +120,13 @@ actor AuthenticationProcessScanner {
         }
 
         for event in evidence {
+            let attribution: AuthenticationAttribution = event.source == .localAuthentication
+                ? .localAuthenticationLog
+                : .authorizationLog
             guard let process = verifiedProcess(
                 for: event,
                 realUserID: realUserID,
+                attribution: attribution,
                 in: catalog
             ) else {
                 continue
@@ -118,9 +134,6 @@ actor AuthenticationProcessScanner {
             let requestKind: AuthenticationRequestKind = event.source == .localAuthentication
                 ? .localAuthentication
                 : .authorization
-            let attribution: AuthenticationAttribution = event.source == .localAuthentication
-                ? .localAuthenticationLog
-                : .authorizationLog
             return await snapshot(
                 for: [
                     Requester(
@@ -139,7 +152,11 @@ actor AuthenticationProcessScanner {
 
         let sudoProcesses = catalog.values
             .filter { process in
-                process.realUserID == realUserID && process.name == "sudo"
+                AuthenticationRequesterUserPolicy.allows(
+                    realUserID: process.realUserID,
+                    signedInUserID: realUserID,
+                    attribution: .heuristicSudo
+                ) && process.name == "sudo"
             }
             .sorted(by: newestFirst)
             .filter { process in
@@ -222,10 +239,15 @@ actor AuthenticationProcessScanner {
     private func verifiedProcess(
         identity: ProcessIdentity,
         realUserID: uid_t,
+        attribution: AuthenticationAttribution,
         in catalog: [pid_t: KernelProcess]
     ) -> KernelProcess? {
         guard let process = catalog[identity.pid],
-              process.realUserID == realUserID,
+              AuthenticationRequesterUserPolicy.allows(
+                  realUserID: process.realUserID,
+                  signedInUserID: realUserID,
+                  attribution: attribution
+              ),
               self.identity(for: process) == identity,
               isSameProcessImage(process) else {
             return nil
@@ -236,10 +258,15 @@ actor AuthenticationProcessScanner {
     private func verifiedProcess(
         for evidence: AuthenticationClientEvent,
         realUserID: uid_t,
+        attribution: AuthenticationAttribution,
         in catalog: [pid_t: KernelProcess]
     ) -> KernelProcess? {
         guard let process = catalog[evidence.processID],
-              process.realUserID == realUserID,
+              AuthenticationRequesterUserPolicy.allows(
+                  realUserID: process.realUserID,
+                  signedInUserID: realUserID,
+                  attribution: attribution
+              ),
               process.startTime.date <= evidence.receivedAt.addingTimeInterval(1),
               isSameProcessImage(process),
               let livePath = executablePath(for: process.pid) else {

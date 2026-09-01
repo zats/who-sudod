@@ -28,10 +28,10 @@ enum AccessibilityWindowFocusResolver {
             return windowIsActive ?? frontmost
         }
 
-        // CG and AX can report adjacent frames while the window is moving.
-        // A known presenter process that is active and frontmost is still the
-        // same authentication surface during this short update gap.
-        if windowIsActive == true, frontmost == true {
+        // CG and AX can report different global coordinates on secondary
+        // displays. A known presenter process that is frontmost, and is not
+        // explicitly inactive, still owns the active authentication surface.
+        if windowIsActive != false, frontmost == true {
             return true
         }
         return nil

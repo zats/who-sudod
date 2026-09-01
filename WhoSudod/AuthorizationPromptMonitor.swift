@@ -43,20 +43,15 @@ enum AuthenticationEvidenceSelection {
             ?? (surfaceKind == .localAuthentication ? 5 : 3)
         let earliest = firstSeenAt.addingTimeInterval(-allowedLeadTime)
         let latest = min(now, firstSeenAt.addingTimeInterval(maximumLagTime))
+        let requiredSource: AuthenticationEventSource = surfaceKind == .securityAgent
+            ? .authorization
+            : .localAuthentication
         let eligible = events.filter { event in
             event.receivedAt >= earliest
                 && event.receivedAt <= latest
-                && (surfaceKind == .securityAgent || event.source == .localAuthentication)
+                && event.source == requiredSource
         }
-        let preferredSource: AuthenticationEventSource = surfaceKind == .securityAgent
-            ? .authorizationShell
-            : .localAuthentication
         return eligible.sorted { lhs, rhs in
-            let lhsIsPreferred = lhs.source == preferredSource
-            let rhsIsPreferred = rhs.source == preferredSource
-            if lhsIsPreferred != rhsIsPreferred {
-                return lhsIsPreferred
-            }
             let lhsDistance = abs(lhs.receivedAt.timeIntervalSince(firstSeenAt))
             let rhsDistance = abs(rhs.receivedAt.timeIntervalSince(firstSeenAt))
             if lhsDistance != rhsDistance {

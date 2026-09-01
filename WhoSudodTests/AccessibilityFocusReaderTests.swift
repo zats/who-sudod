@@ -50,6 +50,18 @@ final class AccessibilityFocusReaderTests: XCTestCase {
         )
     }
 
+    func testUnknownWindowStateUsesFrontmostPresenterWhenFramesDiffer() {
+        XCTAssertEqual(
+            AccessibilityWindowFocusResolver.resolve(
+                frameMatches: false,
+                focused: nil,
+                main: nil,
+                frontmost: true
+            ),
+            true
+        )
+    }
+
     func testWindowIsInactiveWhenPresenterIsNotFrontmost() {
         XCTAssertEqual(
             AccessibilityWindowFocusResolver.resolve(
