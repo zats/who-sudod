@@ -1,14 +1,54 @@
 import AppKit
 
+struct ProcessTableRow: Equatable {
+    let process: ProcessRecord?
+    let requestedCommand: String?
+    let depth: Int
+    let candidateIndex: Int
+}
+
+enum ProcessTableRowBuilder {
+    static func rows(for snapshot: AuthenticationProcessSnapshot) -> [ProcessTableRow] {
+        snapshot.candidates.enumerated().flatMap { candidateIndex, chain in
+            let ancestry = chain.processes.enumerated().map { depth, process in
+                ProcessTableRow(
+                    process: process,
+                    requestedCommand: nil,
+                    depth: depth,
+                    candidateIndex: candidateIndex
+                )
+            }
+            let requesterDepth = max(0, chain.processes.count - 1)
+            let descendants = chain.descendants.map { descendant in
+                ProcessTableRow(
+                    process: descendant.process,
+                    requestedCommand: nil,
+                    depth: requesterDepth + descendant.depthFromRequester,
+                    candidateIndex: candidateIndex
+                )
+            }
+            let command: [ProcessTableRow]
+            if chain.requestKind == .sudo,
+               chain.descendants.isEmpty,
+               let requestedCommand = chain.requesterProcess.requestedCommand {
+                command = [
+                    ProcessTableRow(
+                        process: nil,
+                        requestedCommand: requestedCommand,
+                        depth: requesterDepth + 1,
+                        candidateIndex: candidateIndex
+                    )
+                ]
+            } else {
+                command = []
+            }
+            return ancestry + command + descendants
+        }
+    }
+}
+
 @MainActor
 final class ProcessTableView: NSView, NSTableViewDataSource, NSTableViewDelegate {
-    private struct Row {
-        let process: ProcessRecord?
-        let requestedCommand: String?
-        let depth: Int
-        let candidateIndex: Int
-    }
-
     private enum Column {
         static let process = NSUserInterfaceItemIdentifier("process")
         static let pid = NSUserInterfaceItemIdentifier("pid")
@@ -16,8 +56,7 @@ final class ProcessTableView: NSView, NSTableViewDataSource, NSTableViewDelegate
     }
 
     private let tableView = NSTableView()
-    private let emptyLabel = NSTextField(labelWithString: "No live sudo process found.")
-    private var rows: [Row] = []
+    private var rows: [ProcessTableRow] = []
     private var iconCache: [String: NSImage] = [:]
 
     override init(frame frameRect: NSRect) {
@@ -30,35 +69,8 @@ final class ProcessTableView: NSView, NSTableViewDataSource, NSTableViewDelegate
         fatalError("init(coder:) has not been implemented")
     }
 
-    func update(snapshot: SudoProcessSnapshot) {
-        rows = snapshot.candidates.enumerated().flatMap { candidateIndex, chain in
-            let ancestry = chain.processes.enumerated().map { depth, process in
-                Row(
-                    process: process,
-                    requestedCommand: nil,
-                    depth: depth,
-                    candidateIndex: candidateIndex
-                )
-            }
-            let sudoDepth = max(0, chain.processes.count - 1)
-            let requestedCommand = Row(
-                process: nil,
-                requestedCommand: chain.sudoProcess.requestedCommand,
-                depth: sudoDepth + 1,
-                candidateIndex: candidateIndex
-            )
-            let descendants = chain.descendants.map { descendant in
-                Row(
-                    process: descendant.process,
-                    requestedCommand: nil,
-                    depth: sudoDepth + descendant.depthFromSudo,
-                    candidateIndex: candidateIndex
-                )
-            }
-            let pendingRequest = chain.descendants.isEmpty ? [requestedCommand] : []
-            return ancestry + pendingRequest + descendants
-        }
-        emptyLabel.isHidden = !rows.isEmpty
+    func update(snapshot: AuthenticationProcessSnapshot) {
+        rows = ProcessTableRowBuilder.rows(for: snapshot)
         tableView.reloadData()
     }
 
@@ -96,7 +108,7 @@ final class ProcessTableView: NSView, NSTableViewDataSource, NSTableViewDelegate
             }
             return cell
         case Column.pid:
-            return textCell(item.process.map { String($0.pid) } ?? "pending", monospaced: true)
+            return textCell(item.process.map { String($0.pid) } ?? "—", monospaced: true)
         case Column.path:
             return textCell(pathText(for: item), monospaced: true)
         default:
@@ -121,7 +133,7 @@ final class ProcessTableView: NSView, NSTableViewDataSource, NSTableViewDelegate
         tableView.addTableColumn(pidColumn)
 
         let pathColumn = NSTableColumn(identifier: Column.path)
-        pathColumn.title = "Executable / request"
+        pathColumn.title = "Executable / command"
         pathColumn.width = 420
         pathColumn.minWidth = 240
         tableView.addTableColumn(pathColumn)
@@ -143,29 +155,23 @@ final class ProcessTableView: NSView, NSTableViewDataSource, NSTableViewDelegate
         scrollView.drawsBackground = false
         addSubview(scrollView)
 
-        emptyLabel.translatesAutoresizingMaskIntoConstraints = false
-        emptyLabel.textColor = .secondaryLabelColor
-        emptyLabel.alignment = .center
-        addSubview(emptyLabel)
-
         NSLayoutConstraint.activate([
             scrollView.leadingAnchor.constraint(equalTo: leadingAnchor),
             scrollView.trailingAnchor.constraint(equalTo: trailingAnchor),
             scrollView.topAnchor.constraint(equalTo: topAnchor),
-            scrollView.bottomAnchor.constraint(equalTo: bottomAnchor),
-            emptyLabel.centerXAnchor.constraint(equalTo: centerXAnchor),
-            emptyLabel.centerYAnchor.constraint(equalTo: centerYAnchor, constant: 12)
+            scrollView.bottomAnchor.constraint(equalTo: bottomAnchor)
         ])
     }
 
     private func textCell(_ text: String, monospaced: Bool) -> NSTableCellView {
         let cell = NSTableCellView()
-        let label = NSTextField(labelWithString: text)
+        let safeText = DisplayTextSanitizer.sanitize(text)
+        let label = NSTextField(labelWithString: safeText)
         label.translatesAutoresizingMaskIntoConstraints = false
         label.lineBreakMode = .byTruncatingMiddle
         label.maximumNumberOfLines = 1
         label.font = monospaced ? .monospacedSystemFont(ofSize: 11, weight: .regular) : .systemFont(ofSize: 12)
-        label.toolTip = text
+        label.toolTip = safeText
         cell.addSubview(label)
         cell.textField = label
         NSLayoutConstraint.activate([
@@ -176,32 +182,36 @@ final class ProcessTableView: NSView, NSTableViewDataSource, NSTableViewDelegate
         return cell
     }
 
-    private func pathText(for row: Row) -> String {
+    private func pathText(for row: ProcessTableRow) -> String {
         if let process = row.process {
             return process.executablePath ?? "Path unavailable"
         }
-        return row.requestedCommand ?? "Requested command unavailable"
+        return row.requestedCommand ?? "Command unavailable"
     }
 
     private func requestedCommandName(_ command: String?) -> String {
-        guard let path = requestedExecutablePath(command) else {
-            return "Requested invocation"
+        guard let firstWord = command?.split(whereSeparator: { $0.isWhitespace }).first else {
+            return "Command"
         }
-        if let appPath = enclosingApplicationPath(for: path),
+        let executable = String(firstWord)
+        if executable.hasPrefix("/"),
+           let appPath = enclosingApplicationPath(for: executable),
            let appName = applicationName(at: appPath) {
             return appName
         }
-        let name = URL(fileURLWithPath: path).lastPathComponent
-        return name.isEmpty ? "Requested invocation" : name
+        let name = URL(fileURLWithPath: executable).lastPathComponent
+        return name.isEmpty ? "Command" : name
     }
 
     private func requestedCommandIcon(_ command: String?) -> NSImage {
         if let path = requestedExecutablePath(command) {
-            let icon = NSWorkspace.shared.icon(forFile: path)
+            let icon = NSWorkspace.shared.icon(
+                forFile: enclosingApplicationPath(for: path) ?? path
+            )
             icon.size = NSSize(width: 22, height: 22)
             return icon
         }
-        let icon = NSImage(systemSymbolName: "play.fill", accessibilityDescription: "Requested command")
+        let icon = NSImage(systemSymbolName: "terminal", accessibilityDescription: "Command")
             ?? NSImage()
         icon.size = NSSize(width: 22, height: 22)
         return icon
@@ -317,7 +327,8 @@ private final class ProcessNameCell: NSTableCellView {
     }
 
     func configure(name: String, icon: NSImage, depth: Int, startsCandidate: Bool) {
-        nameLabel.stringValue = depth == 0 ? name : "└ \(name)"
+        let safeName = DisplayTextSanitizer.sanitize(name)
+        nameLabel.stringValue = depth == 0 ? safeName : "└ \(safeName)"
         iconView.image = icon
         leadingConstraint?.constant = 4 + CGFloat(depth) * 12
         separator.isHidden = !startsCandidate

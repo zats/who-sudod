@@ -2,6 +2,12 @@ import AppKit
 import ApplicationServices
 import Permiso
 
+enum ApplicationLaunchContext {
+    static func shouldStartMonitor(environment: [String: String]) -> Bool {
+        environment["XCTestConfigurationFilePath"] == nil
+    }
+}
+
 @main
 @MainActor
 enum WhoSudodApplication {
@@ -22,6 +28,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var accessMenuItem: NSMenuItem?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        guard ApplicationLaunchContext.shouldStartMonitor(
+            environment: ProcessInfo.processInfo.environment
+        ) else {
+            return
+        }
         NSApp.setActivationPolicy(.accessory)
         configureStatusItem()
 

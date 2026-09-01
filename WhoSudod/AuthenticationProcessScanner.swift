@@ -1,7 +1,7 @@
 import Darwin
 import Foundation
 
-enum CommandDisplaySanitizer {
+enum DisplayTextSanitizer {
     static func sanitize(_ value: String) -> String {
         var result = ""
         for scalar in value.unicodeScalars {
@@ -22,7 +22,7 @@ enum CommandDisplaySanitizer {
     }
 }
 
-actor SudoProcessScanner {
+actor AuthenticationProcessScanner {
     private final class OutputAccumulator: @unchecked Sendable {
         private let lock = NSLock()
         private let maximumBytes: Int
@@ -62,13 +62,21 @@ actor SudoProcessScanner {
         let startTime: ProcessStartTime
     }
 
+    private struct Requester {
+        let process: KernelProcess
+        let requestKind: AuthenticationRequestKind
+        let attribution: AuthenticationAttribution
+    }
+
     private var commandLines: [ProcessIdentity: String] = [:]
     private var commandLineAttempts: [ProcessIdentity: Int] = [:]
 
     func snapshot(
         realUserID: uid_t = getuid(),
-        preferredIdentity: ProcessIdentity? = nil
-    ) async -> SudoProcessSnapshot {
+        preferredAnchor: AuthenticationRequestAnchor? = nil,
+        evidence: [AuthenticationClientEvent] = [],
+        allowSudoFallback: Bool
+    ) async -> AuthenticationProcessSnapshot {
         let catalog: [pid_t: KernelProcess]
         do {
             catalog = try captureKernelProcesses()
@@ -76,67 +84,182 @@ actor SudoProcessScanner {
             return .unavailable
         }
 
-        let possibleSudoProcesses = catalog.values
-            .filter { process in
-                process.realUserID == realUserID
-                    && process.name == "sudo"
-            }
-            .sorted { lhs, rhs in
-                if lhs.startTime != rhs.startTime {
-                    return lhs.startTime > rhs.startTime
-                }
-                return lhs.pid > rhs.pid
-            }
-        let liveSudoIdentities = Set(possibleSudoProcesses.map(identity(for:)))
-        commandLines = commandLines.filter { liveSudoIdentities.contains($0.key) }
-        commandLineAttempts = commandLineAttempts.filter { liveSudoIdentities.contains($0.key) }
-        let commandIdentity = preferredIdentity.flatMap { identity in
-            liveSudoIdentities.contains(identity) ? identity : nil
-        } ?? possibleSudoProcesses.first.map(identity(for:))
+        pruneCommandLineCache(using: catalog)
 
-        var relevantProcesses: [pid_t: ProcessRecord] = [:]
-        var inspectionWasIncomplete = false
-        for sudoProcess in possibleSudoProcesses {
-            let chain = ancestry(from: sudoProcess, in: catalog)
-            let path = executablePath(for: sudoProcess.pid)
-            guard isSameProcessImage(sudoProcess) else {
+        if let preferredAnchor,
+           let process = verifiedProcess(
+               identity: preferredAnchor.identity,
+               realUserID: realUserID,
+               in: catalog
+           ) {
+            return await snapshot(
+                for: [
+                    Requester(
+                        process: process,
+                        requestKind: preferredAnchor.requestKind,
+                        attribution: preferredAnchor.attribution
+                    )
+                ],
+                in: catalog
+            )
+        }
+        if let preferredAnchor, preferredAnchor.attribution.isLogAttributed {
+            return .empty
+        }
+
+        for event in evidence {
+            guard let process = verifiedProcess(
+                for: event,
+                realUserID: realUserID,
+                in: catalog
+            ) else {
                 continue
             }
-            guard let path else {
+            let requestKind: AuthenticationRequestKind = event.source == .localAuthentication
+                ? .localAuthentication
+                : .authorization
+            let attribution: AuthenticationAttribution = event.source == .localAuthentication
+                ? .localAuthenticationLog
+                : .authorizationLog
+            return await snapshot(
+                for: [
+                    Requester(
+                        process: process,
+                        requestKind: process.name == "sudo" ? .sudo : requestKind,
+                        attribution: attribution
+                    )
+                ],
+                in: catalog
+            )
+        }
+
+        guard allowSudoFallback else {
+            return .empty
+        }
+
+        let sudoProcesses = catalog.values
+            .filter { process in
+                process.realUserID == realUserID && process.name == "sudo"
+            }
+            .sorted(by: newestFirst)
+            .filter { process in
+                guard isSameProcessImage(process), executablePath(for: process.pid) == "/usr/bin/sudo" else {
+                    return false
+                }
+                return true
+            }
+        return await snapshot(
+            for: sudoProcesses.map { process in
+                Requester(
+                    process: process,
+                    requestKind: .sudo,
+                    attribution: .heuristicSudo
+                )
+            },
+            in: catalog
+        )
+    }
+
+    private func snapshot(
+        for requesters: [Requester],
+        in catalog: [pid_t: KernelProcess]
+    ) async -> AuthenticationProcessSnapshot {
+        guard !requesters.isEmpty else {
+            return .empty
+        }
+
+        var relevantProcesses: [pid_t: ProcessRecord] = [:]
+        var verifiedRequesters: [Requester] = []
+        var inspectionWasIncomplete = false
+        for (index, requester) in requesters.enumerated() {
+            let process = requester.process
+            guard isSameProcessImage(process) else {
+                continue
+            }
+            guard let path = executablePath(for: process.pid) else {
                 inspectionWasIncomplete = true
                 continue
             }
-            guard path == "/usr/bin/sudo" else {
-                continue
-            }
-            let commandLine = identity(for: sudoProcess) == commandIdentity
-                ? await commandLine(for: sudoProcess)
+            let commandLine = path == "/usr/bin/sudo" && index == 0
+                ? await commandLine(for: process)
                 : nil
-            let sudoRecord = record(
-                for: sudoProcess,
+            let requesterRecord = record(
+                for: process,
                 executablePath: path,
                 commandLine: commandLine
             )
-            relevantProcesses[sudoRecord.pid] = sudoRecord
+            relevantProcesses[requesterRecord.pid] = requesterRecord
+            verifiedRequesters.append(requester)
 
-            for process in chain.dropFirst() {
-                relevantProcesses[process.pid] = resolvedRecord(for: process)
-                    ?? unresolvedRecord(for: process)
+            for ancestor in ancestry(from: process, in: catalog).dropFirst() {
+                relevantProcesses[ancestor.pid] = resolvedRecord(for: ancestor)
+                    ?? unresolvedRecord(for: ancestor)
             }
-            for process in descendants(from: sudoProcess, in: catalog) {
-                relevantProcesses[process.pid] = resolvedRecord(for: process)
-                    ?? unresolvedRecord(for: process)
+            for descendant in descendants(from: process, in: catalog) {
+                relevantProcesses[descendant.pid] = resolvedRecord(for: descendant)
+                    ?? unresolvedRecord(for: descendant)
             }
         }
 
+        guard let first = verifiedRequesters.first else {
+            return AuthenticationProcessSnapshot(
+                candidates: [],
+                inspectionState: inspectionWasIncomplete ? .partial : .complete
+            )
+        }
         let snapshot = ProcessTreeBuilder.build(
             records: Array(relevantProcesses.values),
-            realUserID: realUserID
+            requesterIdentities: verifiedRequesters.map { identity(for: $0.process) },
+            requestKind: first.requestKind,
+            attribution: first.attribution
         )
-        return SudoProcessSnapshot(
+        return AuthenticationProcessSnapshot(
             candidates: snapshot.candidates,
             inspectionState: inspectionWasIncomplete ? .partial : .complete
         )
+    }
+
+    private func verifiedProcess(
+        identity: ProcessIdentity,
+        realUserID: uid_t,
+        in catalog: [pid_t: KernelProcess]
+    ) -> KernelProcess? {
+        guard let process = catalog[identity.pid],
+              process.realUserID == realUserID,
+              self.identity(for: process) == identity,
+              isSameProcessImage(process) else {
+            return nil
+        }
+        return process
+    }
+
+    private func verifiedProcess(
+        for evidence: AuthenticationClientEvent,
+        realUserID: uid_t,
+        in catalog: [pid_t: KernelProcess]
+    ) -> KernelProcess? {
+        guard let process = catalog[evidence.processID],
+              process.realUserID == realUserID,
+              process.startTime.date <= evidence.receivedAt.addingTimeInterval(1),
+              isSameProcessImage(process),
+              let livePath = executablePath(for: process.pid) else {
+            return nil
+        }
+        if let expectedPath = evidence.executablePath,
+           normalizedPath(expectedPath) != normalizedPath(livePath) {
+            return nil
+        }
+        return process
+    }
+
+    private func pruneCommandLineCache(using catalog: [pid_t: KernelProcess]) {
+        let liveSudoIdentities = Set(
+            catalog.values
+                .filter { $0.name == "sudo" }
+                .map(identity(for:))
+        )
+        commandLines = commandLines.filter { liveSudoIdentities.contains($0.key) }
+        commandLineAttempts = commandLineAttempts.filter { liveSudoIdentities.contains($0.key) }
     }
 
     private func captureKernelProcesses() throws -> [pid_t: KernelProcess] {
@@ -253,7 +376,7 @@ actor SudoProcessScanner {
         executablePath: String?,
         commandLine: String? = nil
     ) -> ProcessRecord {
-        return ProcessRecord(
+        ProcessRecord(
             pid: process.pid,
             parentPID: process.parentPID,
             realUserID: process.realUserID,
@@ -305,8 +428,19 @@ actor SudoProcessScanner {
         return String(decoding: buffer.prefix { $0 != 0 }.map(UInt8.init(bitPattern:)), as: UTF8.self)
     }
 
+    private func normalizedPath(_ path: String) -> String {
+        URL(fileURLWithPath: path).resolvingSymlinksInPath().standardizedFileURL.path
+    }
+
     private func identity(for process: KernelProcess) -> ProcessIdentity {
         ProcessIdentity(pid: process.pid, startTime: process.startTime)
+    }
+
+    private func newestFirst(_ lhs: KernelProcess, _ rhs: KernelProcess) -> Bool {
+        if lhs.startTime != rhs.startTime {
+            return lhs.startTime > rhs.startTime
+        }
+        return lhs.pid > rhs.pid
     }
 
     private func commandLine(for process: KernelProcess) async -> String? {
@@ -378,7 +512,7 @@ actor SudoProcessScanner {
         guard !commandLine.isEmpty else {
             return nil
         }
-        let sanitized = CommandDisplaySanitizer.sanitize(commandLine)
+        let sanitized = DisplayTextSanitizer.sanitize(commandLine)
         commandLines[identity] = sanitized
         return sanitized
     }

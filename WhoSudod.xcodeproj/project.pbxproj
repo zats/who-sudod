@@ -9,16 +9,24 @@
 /* Begin PBXBuildFile section */
 		019D4FEB78CE50DFCCDD8216 /* WindowGeometryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4539943B67AC5EE2C1527DA2 /* WindowGeometryTests.swift */; };
 		09409FEBFAA280621E2A7F27 /* Application.swift in Sources */ = {isa = PBXBuildFile; fileRef = 33D05C2FE950BD1FDA0949CC /* Application.swift */; };
-		0B920246160CAA6901E9C880 /* SecurityAgentWindowLocator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1E8E25D340719FA88B1D51A7 /* SecurityAgentWindowLocator.swift */; };
 		10A0A88AFDF02720CCD69AD7 /* Permiso in Frameworks */ = {isa = PBXBuildFile; productRef = 396420E933DA39865468A832 /* Permiso */; };
+		157FB13FDA546B7B01FC80DD /* AuthenticationEventMonitor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 851731E6EF8847DB480A56EF /* AuthenticationEventMonitor.swift */; };
+		16144255C80A8D9CBE8D65CD /* AuthenticationProcessSnapshotTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = CF7358B92D94959808B90335 /* AuthenticationProcessSnapshotTests.swift */; };
+		2008085E923BBF10D0D4F9C8 /* AuthenticationWindowLocator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9CDB62CC84A6D8431E0A910D /* AuthenticationWindowLocator.swift */; };
 		3A3EF34CAE7A4A025386A212 /* AccessibilityFocusReader.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7402F3F7DAFF7508DD93C7A6 /* AccessibilityFocusReader.swift */; };
-		90158328A21F74409E52A18C /* ProcessTreeSnapshot.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7605ACA63F72125D5122AFCA /* ProcessTreeSnapshot.swift */; };
+		5738E768692F024C36E34D63 /* ApplicationLaunchContextTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 040151B002872CBB1C3786FA /* ApplicationLaunchContextTests.swift */; };
 		98B58325AA0922D2CFF1F074 /* ProcessTreePanelController.swift in Sources */ = {isa = PBXBuildFile; fileRef = BEE55391F387DC45BEDC7FB2 /* ProcessTreePanelController.swift */; };
+		B4AB0A8A20C87F54598DC15C /* WindowObservationStabilityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB639B3A0B1076EE86B16FA2 /* WindowObservationStabilityTests.swift */; };
+		B7E7CAD4761303D0593E07D4 /* AuthenticationEvidenceSelectionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0BE450A04104BDB3CCA1B1AB /* AuthenticationEvidenceSelectionTests.swift */; };
+		B9C9F874CD660A2AC35C9C7D /* AuthenticationProcessSnapshot.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7B49257CC2AF98EC5663BF41 /* AuthenticationProcessSnapshot.swift */; };
+		C3EF4812A71D7C816C0E69A3 /* ProcessTableRowBuilderTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1495716BC948BD4456C24B9E /* ProcessTableRowBuilderTests.swift */; };
 		C65644626A6A1E7C5CC7E4D7 /* ProcessTableView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7A2C6E263210ACF5D96D7685 /* ProcessTableView.swift */; };
 		C9EB5F92C9452F835DDA64A8 /* AuthorizationPromptMonitor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 000D307ACBE1E25ECCF1171E /* AuthorizationPromptMonitor.swift */; };
+		CBE20761DAC82A496B439DB0 /* AuthenticationWindowLocatorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1033914E79AD40696F3B68AA /* AuthenticationWindowLocatorTests.swift */; };
+		CCC8C665392974DC629653C6 /* AccessibilityFocusReaderTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3C845FCD9FFA5C1EBC2BE31E /* AccessibilityFocusReaderTests.swift */; };
 		D3B162A064531277B39EFAD7 /* WindowGeometry.swift in Sources */ = {isa = PBXBuildFile; fileRef = 978EB43B0AA18113CE20C738 /* WindowGeometry.swift */; };
-		DA513E0D6BD36D3BC584F449 /* SudoProcessScanner.swift in Sources */ = {isa = PBXBuildFile; fileRef = 299C32E4CC6AFBE4E117B743 /* SudoProcessScanner.swift */; };
-		EB789924792EAFA034C9DFE3 /* ProcessTreeSnapshotTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D8D3FA9CE1539CF78E8443AE /* ProcessTreeSnapshotTests.swift */; };
+		E328417D39652F8BB1360F41 /* AuthenticationEventMonitorTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC1F520B5224594A4BAB6C35 /* AuthenticationEventMonitorTests.swift */; };
+		E6D13A2D8A438D5F21B306A0 /* AuthenticationProcessScanner.swift in Sources */ = {isa = PBXBuildFile; fileRef = C2A76BAFE23C034C3C5B153B /* AuthenticationProcessScanner.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -33,19 +41,27 @@
 
 /* Begin PBXFileReference section */
 		000D307ACBE1E25ECCF1171E /* AuthorizationPromptMonitor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthorizationPromptMonitor.swift; sourceTree = "<group>"; };
+		040151B002872CBB1C3786FA /* ApplicationLaunchContextTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ApplicationLaunchContextTests.swift; sourceTree = "<group>"; };
 		042772388007744053E5285A /* Who Sudo'd.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "Who Sudo'd.app"; sourceTree = BUILT_PRODUCTS_DIR; };
-		1E8E25D340719FA88B1D51A7 /* SecurityAgentWindowLocator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SecurityAgentWindowLocator.swift; sourceTree = "<group>"; };
-		299C32E4CC6AFBE4E117B743 /* SudoProcessScanner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SudoProcessScanner.swift; sourceTree = "<group>"; };
+		0BE450A04104BDB3CCA1B1AB /* AuthenticationEvidenceSelectionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthenticationEvidenceSelectionTests.swift; sourceTree = "<group>"; };
+		1033914E79AD40696F3B68AA /* AuthenticationWindowLocatorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthenticationWindowLocatorTests.swift; sourceTree = "<group>"; };
+		1495716BC948BD4456C24B9E /* ProcessTableRowBuilderTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProcessTableRowBuilderTests.swift; sourceTree = "<group>"; };
 		33D05C2FE950BD1FDA0949CC /* Application.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Application.swift; sourceTree = "<group>"; };
+		3C845FCD9FFA5C1EBC2BE31E /* AccessibilityFocusReaderTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AccessibilityFocusReaderTests.swift; sourceTree = "<group>"; };
 		4067EB3A3845A56403315B78 /* WhoSudodTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = WhoSudodTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		4539943B67AC5EE2C1527DA2 /* WindowGeometryTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WindowGeometryTests.swift; sourceTree = "<group>"; };
 		7402F3F7DAFF7508DD93C7A6 /* AccessibilityFocusReader.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AccessibilityFocusReader.swift; sourceTree = "<group>"; };
-		7605ACA63F72125D5122AFCA /* ProcessTreeSnapshot.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProcessTreeSnapshot.swift; sourceTree = "<group>"; };
 		7A2C6E263210ACF5D96D7685 /* ProcessTableView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProcessTableView.swift; sourceTree = "<group>"; };
+		7B49257CC2AF98EC5663BF41 /* AuthenticationProcessSnapshot.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthenticationProcessSnapshot.swift; sourceTree = "<group>"; };
+		851731E6EF8847DB480A56EF /* AuthenticationEventMonitor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthenticationEventMonitor.swift; sourceTree = "<group>"; };
 		978EB43B0AA18113CE20C738 /* WindowGeometry.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WindowGeometry.swift; sourceTree = "<group>"; };
+		9CDB62CC84A6D8431E0A910D /* AuthenticationWindowLocator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthenticationWindowLocator.swift; sourceTree = "<group>"; };
+		AB639B3A0B1076EE86B16FA2 /* WindowObservationStabilityTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WindowObservationStabilityTests.swift; sourceTree = "<group>"; };
 		BD73838D6B56512AA0CDE3F9 /* permiso */ = {isa = PBXFileReference; lastKnownFileType = folder; name = permiso; path = ../Libraries/permiso; sourceTree = SOURCE_ROOT; };
 		BEE55391F387DC45BEDC7FB2 /* ProcessTreePanelController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProcessTreePanelController.swift; sourceTree = "<group>"; };
-		D8D3FA9CE1539CF78E8443AE /* ProcessTreeSnapshotTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProcessTreeSnapshotTests.swift; sourceTree = "<group>"; };
+		C2A76BAFE23C034C3C5B153B /* AuthenticationProcessScanner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthenticationProcessScanner.swift; sourceTree = "<group>"; };
+		CC1F520B5224594A4BAB6C35 /* AuthenticationEventMonitorTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthenticationEventMonitorTests.swift; sourceTree = "<group>"; };
+		CF7358B92D94959808B90335 /* AuthenticationProcessSnapshotTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthenticationProcessSnapshotTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -75,12 +91,13 @@
 			children = (
 				7402F3F7DAFF7508DD93C7A6 /* AccessibilityFocusReader.swift */,
 				33D05C2FE950BD1FDA0949CC /* Application.swift */,
+				851731E6EF8847DB480A56EF /* AuthenticationEventMonitor.swift */,
+				C2A76BAFE23C034C3C5B153B /* AuthenticationProcessScanner.swift */,
+				7B49257CC2AF98EC5663BF41 /* AuthenticationProcessSnapshot.swift */,
+				9CDB62CC84A6D8431E0A910D /* AuthenticationWindowLocator.swift */,
 				000D307ACBE1E25ECCF1171E /* AuthorizationPromptMonitor.swift */,
 				7A2C6E263210ACF5D96D7685 /* ProcessTableView.swift */,
 				BEE55391F387DC45BEDC7FB2 /* ProcessTreePanelController.swift */,
-				7605ACA63F72125D5122AFCA /* ProcessTreeSnapshot.swift */,
-				1E8E25D340719FA88B1D51A7 /* SecurityAgentWindowLocator.swift */,
-				299C32E4CC6AFBE4E117B743 /* SudoProcessScanner.swift */,
 				978EB43B0AA18113CE20C738 /* WindowGeometry.swift */,
 			);
 			path = WhoSudod;
@@ -106,8 +123,15 @@
 		D48AA418813C6AA68FBB711B /* WhoSudodTests */ = {
 			isa = PBXGroup;
 			children = (
-				D8D3FA9CE1539CF78E8443AE /* ProcessTreeSnapshotTests.swift */,
+				3C845FCD9FFA5C1EBC2BE31E /* AccessibilityFocusReaderTests.swift */,
+				040151B002872CBB1C3786FA /* ApplicationLaunchContextTests.swift */,
+				CC1F520B5224594A4BAB6C35 /* AuthenticationEventMonitorTests.swift */,
+				0BE450A04104BDB3CCA1B1AB /* AuthenticationEvidenceSelectionTests.swift */,
+				CF7358B92D94959808B90335 /* AuthenticationProcessSnapshotTests.swift */,
+				1033914E79AD40696F3B68AA /* AuthenticationWindowLocatorTests.swift */,
+				1495716BC948BD4456C24B9E /* ProcessTableRowBuilderTests.swift */,
 				4539943B67AC5EE2C1527DA2 /* WindowGeometryTests.swift */,
+				AB639B3A0B1076EE86B16FA2 /* WindowObservationStabilityTests.swift */,
 			);
 			path = WhoSudodTests;
 			sourceTree = "<group>";
@@ -199,8 +223,15 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				EB789924792EAFA034C9DFE3 /* ProcessTreeSnapshotTests.swift in Sources */,
+				CCC8C665392974DC629653C6 /* AccessibilityFocusReaderTests.swift in Sources */,
+				5738E768692F024C36E34D63 /* ApplicationLaunchContextTests.swift in Sources */,
+				E328417D39652F8BB1360F41 /* AuthenticationEventMonitorTests.swift in Sources */,
+				B7E7CAD4761303D0593E07D4 /* AuthenticationEvidenceSelectionTests.swift in Sources */,
+				16144255C80A8D9CBE8D65CD /* AuthenticationProcessSnapshotTests.swift in Sources */,
+				CBE20761DAC82A496B439DB0 /* AuthenticationWindowLocatorTests.swift in Sources */,
+				C3EF4812A71D7C816C0E69A3 /* ProcessTableRowBuilderTests.swift in Sources */,
 				019D4FEB78CE50DFCCDD8216 /* WindowGeometryTests.swift in Sources */,
+				B4AB0A8A20C87F54598DC15C /* WindowObservationStabilityTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -210,12 +241,13 @@
 			files = (
 				3A3EF34CAE7A4A025386A212 /* AccessibilityFocusReader.swift in Sources */,
 				09409FEBFAA280621E2A7F27 /* Application.swift in Sources */,
+				157FB13FDA546B7B01FC80DD /* AuthenticationEventMonitor.swift in Sources */,
+				E6D13A2D8A438D5F21B306A0 /* AuthenticationProcessScanner.swift in Sources */,
+				B9C9F874CD660A2AC35C9C7D /* AuthenticationProcessSnapshot.swift in Sources */,
+				2008085E923BBF10D0D4F9C8 /* AuthenticationWindowLocator.swift in Sources */,
 				C9EB5F92C9452F835DDA64A8 /* AuthorizationPromptMonitor.swift in Sources */,
 				C65644626A6A1E7C5CC7E4D7 /* ProcessTableView.swift in Sources */,
 				98B58325AA0922D2CFF1F074 /* ProcessTreePanelController.swift in Sources */,
-				90158328A21F74409E52A18C /* ProcessTreeSnapshot.swift in Sources */,
-				0B920246160CAA6901E9C880 /* SecurityAgentWindowLocator.swift in Sources */,
-				DA513E0D6BD36D3BC584F449 /* SudoProcessScanner.swift in Sources */,
 				D3B162A064531277B39EFAD7 /* WindowGeometry.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;

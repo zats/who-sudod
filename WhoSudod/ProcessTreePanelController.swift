@@ -3,7 +3,7 @@ import AppKit
 @MainActor
 final class ProcessTreePanelController: NSWindowController {
     private let content: CompanionContentView
-    private var currentSnapshot: SudoProcessSnapshot?
+    private var currentSnapshot: AuthenticationProcessSnapshot?
     private(set) var isPresented = false
 
     init() {
@@ -25,7 +25,7 @@ final class ProcessTreePanelController: NSWindowController {
     }
 
     func show(
-        snapshot: SudoProcessSnapshot,
+        snapshot: AuthenticationProcessSnapshot,
         authenticationFrame: CGRect,
         visibleFrame: CGRect
     ) {
@@ -46,11 +46,14 @@ final class ProcessTreePanelController: NSWindowController {
             sidecar.side,
             reservedDialogWidth: sidecar.reservedDialogWidth
         )
-        content.fit(height: sidecar.frame.height)
 
         if window.frame != sidecar.frame {
-            window.setFrame(sidecar.frame, display: isPresented)
-            content.frame = NSRect(origin: .zero, size: sidecar.frame.size)
+            if window.frame.size == sidecar.frame.size {
+                window.setFrameOrigin(sidecar.frame.origin)
+            } else {
+                window.setFrame(sidecar.frame, display: isPresented)
+                content.frame = NSRect(origin: .zero, size: sidecar.frame.size)
+            }
         }
         if !isPresented {
             window.orderFrontRegardless()
@@ -85,23 +88,14 @@ private final class PassivePanel: NSPanel {
 
 @MainActor
 private final class CompanionContentView: NSView {
-    private let titleLabel = NSTextField(labelWithString: "Administrator access requested")
-    private let subtitleLabel = NSTextField(labelWithString: "")
     private let processTable = ProcessTableView()
-    private let tableHeight: NSLayoutConstraint
     private let material = NSVisualEffectView()
     private let body = NSView()
-    private let separator = NSBox()
-    private let footer = NSTextField(
-        labelWithString: "Read-only snapshot. No authentication data is read."
-    )
     private var bodySideConstraints: [NSLayoutConstraint] = []
-    private var textLeadingConstraint: NSLayoutConstraint?
     private var attachmentSide: SidecarSide?
     private var reservedDialogWidth: CGFloat = 0
 
     override init(frame frameRect: NSRect) {
-        tableHeight = processTable.heightAnchor.constraint(equalToConstant: 84)
         super.init(frame: frameRect)
         configure()
     }
@@ -111,50 +105,8 @@ private final class CompanionContentView: NSView {
         fatalError("init(coder:) has not been implemented")
     }
 
-    func update(snapshot: SudoProcessSnapshot) {
+    func update(snapshot: AuthenticationProcessSnapshot) {
         processTable.update(snapshot: snapshot)
-        if snapshot.candidates.isEmpty {
-            switch snapshot.inspectionState {
-            case .pending:
-                subtitleLabel.stringValue = "Looking for live sudo candidates…"
-            case .complete:
-                subtitleLabel.stringValue = "No verified live sudo candidate was found."
-            case .partial:
-                subtitleLabel.stringValue = "Process inspection was incomplete; no candidate was verified."
-            case .unavailable:
-                subtitleLabel.stringValue = "Process inspection is unavailable."
-            }
-            return
-        }
-
-        if snapshot.candidates.count == 1 {
-            let chain = snapshot.candidates[0]
-            let completeness = chain.isComplete
-                ? ""
-                : " Current parent chain may be incomplete."
-            if snapshot.inspectionState == .unavailable {
-                subtitleLabel.stringValue = "Last known sudo request. Live process inspection is unavailable.\(completeness)"
-            } else {
-                let requestState: String
-                if !chain.descendants.isEmpty {
-                    requestState = " Live descendants are shown."
-                } else if chain.sudoProcess.requestedCommand != nil {
-                    requestState = " The requested command has not started."
-                } else {
-                    requestState = " No live descendant is present."
-                }
-                let rescanNote = snapshot.inspectionState == .partial
-                    ? " Inspection is incomplete."
-                    : ""
-                subtitleLabel.stringValue = "Likely live sudo request.\(requestState)\(completeness)\(rescanNote)"
-            }
-        } else {
-            subtitleLabel.stringValue = "Likely live sudo request."
-        }
-    }
-
-    func fit(height: CGFloat) {
-        tableHeight.constant = max(58, height - 120)
     }
 
     func setAttachmentSide(_ side: SidecarSide, reservedDialogWidth: CGFloat) {
@@ -180,7 +132,6 @@ private final class CompanionContentView: NSView {
             ]
         }
         NSLayoutConstraint.activate(bodySideConstraints)
-        textLeadingConstraint?.constant = side == .left ? 26 : 16
         attachmentSide = side
         self.reservedDialogWidth = reservedDialogWidth
     }
@@ -211,34 +162,7 @@ private final class CompanionContentView: NSView {
         body.translatesAutoresizingMaskIntoConstraints = false
         material.addSubview(body)
 
-        titleLabel.translatesAutoresizingMaskIntoConstraints = false
-        titleLabel.font = .systemFont(ofSize: 17, weight: .semibold)
-        body.addSubview(titleLabel)
-
-        subtitleLabel.translatesAutoresizingMaskIntoConstraints = false
-        subtitleLabel.font = .systemFont(ofSize: 12)
-        subtitleLabel.textColor = .secondaryLabelColor
-        subtitleLabel.maximumNumberOfLines = 1
-        subtitleLabel.lineBreakMode = .byTruncatingTail
-        body.addSubview(subtitleLabel)
-
         body.addSubview(processTable)
-
-        separator.translatesAutoresizingMaskIntoConstraints = false
-        separator.boxType = .separator
-        body.addSubview(separator)
-
-        footer.translatesAutoresizingMaskIntoConstraints = false
-        footer.font = .systemFont(ofSize: 11)
-        footer.textColor = .tertiaryLabelColor
-        body.addSubview(footer)
-
-        tableHeight.isActive = true
-        textLeadingConstraint = titleLabel.leadingAnchor.constraint(
-            equalTo: body.leadingAnchor,
-            constant: 16
-        )
-        textLeadingConstraint?.isActive = true
         NSLayoutConstraint.activate([
             material.topAnchor.constraint(equalTo: topAnchor),
             material.leadingAnchor.constraint(equalTo: leadingAnchor),
@@ -253,25 +177,10 @@ private final class CompanionContentView: NSView {
             body.topAnchor.constraint(equalTo: material.topAnchor),
             body.bottomAnchor.constraint(equalTo: material.bottomAnchor),
 
-            titleLabel.topAnchor.constraint(equalTo: body.topAnchor, constant: 20),
-            titleLabel.trailingAnchor.constraint(equalTo: body.trailingAnchor, constant: -16),
-
-            subtitleLabel.topAnchor.constraint(equalTo: titleLabel.bottomAnchor, constant: 2),
-            subtitleLabel.leadingAnchor.constraint(equalTo: titleLabel.leadingAnchor),
-            subtitleLabel.trailingAnchor.constraint(equalTo: titleLabel.trailingAnchor),
-
-            processTable.topAnchor.constraint(equalTo: subtitleLabel.bottomAnchor, constant: 10),
+            processTable.topAnchor.constraint(equalTo: body.topAnchor, constant: 16),
             processTable.leadingAnchor.constraint(equalTo: body.leadingAnchor, constant: 12),
             processTable.trailingAnchor.constraint(equalTo: body.trailingAnchor, constant: -12),
-
-            separator.topAnchor.constraint(equalTo: processTable.bottomAnchor, constant: 10),
-            separator.leadingAnchor.constraint(equalTo: titleLabel.leadingAnchor),
-            separator.trailingAnchor.constraint(equalTo: titleLabel.trailingAnchor),
-
-            footer.topAnchor.constraint(equalTo: separator.bottomAnchor, constant: 8),
-            footer.leadingAnchor.constraint(equalTo: titleLabel.leadingAnchor),
-            footer.trailingAnchor.constraint(equalTo: titleLabel.trailingAnchor),
-            footer.bottomAnchor.constraint(equalTo: body.bottomAnchor, constant: -20)
+            processTable.bottomAnchor.constraint(equalTo: body.bottomAnchor, constant: -16)
         ])
     }
 }
