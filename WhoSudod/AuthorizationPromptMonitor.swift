@@ -177,6 +177,7 @@ final class AuthorizationPromptMonitor: NSObject {
 
     private let logger = Logger(subsystem: "com.zats.WhoSudo", category: "AuthorizationMonitor")
     private let scanner = AuthenticationProcessScanner()
+    private let ignoredApplications: IgnoredApplicationsStore
     private let panel: ProcessTreePanelController
     private let statusHandler: (AuthorizationMonitorStatus) -> Void
     private lazy var eventMonitor = AuthenticationEventMonitor { [weak self] event in
@@ -204,9 +205,11 @@ final class AuthorizationPromptMonitor: NSObject {
     private var lastReportedStatus: AuthorizationMonitorStatus?
     private var fastCoreGraphicsDiscoveryUntil: TimeInterval = 0
     private var frontmostApplicationProcessID: pid_t?
+    private var isCurrentSystemPromptIgnored = false
 
     init(
         displayMode: ProcessDisplayMode = .simple,
+        ignoredApplications: IgnoredApplicationsStore,
         displayModeRequestHandler: @escaping (ProcessDisplayMode) -> Void = { _ in },
         statusHandler: @escaping (AuthorizationMonitorStatus) -> Void
     ) {
@@ -214,6 +217,7 @@ final class AuthorizationPromptMonitor: NSObject {
             displayMode: displayMode,
             displayModeRequestHandler: displayModeRequestHandler
         )
+        self.ignoredApplications = ignoredApplications
         self.statusHandler = statusHandler
         super.init()
     }
@@ -326,6 +330,7 @@ final class AuthorizationPromptMonitor: NSObject {
             promptSessions.removeAll()
             targetFirstSeenAt = nil
             lastProcessSnapshot = .pending
+            isCurrentSystemPromptIgnored = false
             observationStability.reset()
             terminalPromptStability.reset()
             panel.hide(promptPresent: false, accessibilityTrusted: false)
@@ -420,6 +425,7 @@ final class AuthorizationPromptMonitor: NSObject {
                 target = nil
                 targetFirstSeenAt = nil
                 lastProcessSnapshot = .pending
+                isCurrentSystemPromptIgnored = false
                 observationStability.reset()
                 if let candidate {
                     activatePrompt(candidate, at: Date())
@@ -499,6 +505,15 @@ final class AuthorizationPromptMonitor: NSObject {
             startProcessScan(for: window)
         }
 
+        guard !isCurrentSystemPromptIgnored else {
+            let wasPresented = panel.isPresented
+            panel.hide(promptPresent: true, accessibilityTrusted: true)
+            if wasPresented {
+                report(isShowingPanel: false)
+            }
+            return
+        }
+
         panel.show(
             snapshot: lastProcessSnapshot,
             promptSequence: promptSequence,
@@ -547,6 +562,7 @@ final class AuthorizationPromptMonitor: NSObject {
         target = nil
         targetFirstSeenAt = nil
         lastProcessSnapshot = .pending
+        isCurrentSystemPromptIgnored = false
         observationStability.reset()
         nextDiscoveryTime = 0
         let wasPresented = panel.isPresented
@@ -583,10 +599,20 @@ final class AuthorizationPromptMonitor: NSObject {
                 return
             }
 
-            let refreshedSnapshot = ProcessSnapshotSelection.refreshingLive(
-                current: self.lastProcessSnapshot,
-                observed: newSnapshot
+            let visibleCurrent = IgnoredApplicationsPolicy.filtering(
+                self.lastProcessSnapshot,
+                by: self.ignoredApplications.rules
             )
+            let visibleNewSnapshot = IgnoredApplicationsPolicy.filtering(
+                newSnapshot,
+                by: self.ignoredApplications.rules
+            )
+            let refreshedSnapshot = ProcessSnapshotSelection.refreshingLive(
+                current: visibleCurrent,
+                observed: visibleNewSnapshot
+            )
+            self.isCurrentSystemPromptIgnored = !newSnapshot.candidates.isEmpty
+                && visibleNewSnapshot.candidates.isEmpty
             if refreshedSnapshot != self.lastProcessSnapshot {
                 self.logger.notice(
                     "Process snapshot has \(newSnapshot.candidates.count, privacy: .public) requester candidate(s)"
@@ -598,6 +624,10 @@ final class AuthorizationPromptMonitor: NSObject {
                     at: Date()
                 )
             }
+            self.updatePanel(
+                for: window,
+                now: ProcessInfo.processInfo.systemUptime
+            )
         }
     }
 
@@ -655,7 +685,7 @@ final class AuthorizationPromptMonitor: NSObject {
             })?.anchor
         }
         terminalPromptScanTask = Task { [weak self, scanner] in
-            let observed = await scanner.terminalPasswordSudoSnapshot(
+            let unfilteredObserved = await scanner.terminalPasswordSudoSnapshot(
                 preferredAnchor: preferredAnchor
             )
             guard !Task.isCancelled,
@@ -667,6 +697,10 @@ final class AuthorizationPromptMonitor: NSObject {
             guard self.target == nil else {
                 return
             }
+            let observed = IgnoredApplicationsPolicy.filtering(
+                unfilteredObserved,
+                by: self.ignoredApplications.rules
+            )
 
             let observedIdentities = observed.candidates.map {
                 $0.requesterProcess.identity
@@ -804,7 +838,12 @@ final class AuthorizationPromptMonitor: NSObject {
         target = window
         targetFirstSeenAt = session.firstSeenAt
         promptSequence = session.promptSequence
-        lastProcessSnapshot = session.processSnapshot
+        lastProcessSnapshot = IgnoredApplicationsPolicy.filtering(
+            session.processSnapshot,
+            by: ignoredApplications.rules
+        )
+        isCurrentSystemPromptIgnored = !session.processSnapshot.candidates.isEmpty
+            && lastProcessSnapshot.candidates.isEmpty
         nextProcessScanTime = 0
         observationStability.reset()
     }
@@ -823,7 +862,12 @@ final class AuthorizationPromptMonitor: NSObject {
         target = newWindow
         targetFirstSeenAt = session.firstSeenAt
         promptSequence = session.promptSequence
-        lastProcessSnapshot = session.processSnapshot
+        lastProcessSnapshot = IgnoredApplicationsPolicy.filtering(
+            session.processSnapshot,
+            by: ignoredApplications.rules
+        )
+        isCurrentSystemPromptIgnored = !session.processSnapshot.candidates.isEmpty
+            && lastProcessSnapshot.candidates.isEmpty
         nextProcessScanTime = 0
         observationStability.reset()
     }

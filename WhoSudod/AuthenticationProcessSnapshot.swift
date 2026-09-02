@@ -213,7 +213,7 @@ struct ProcessRecord: Hashable, Sendable {
     }
 }
 
-enum AuthenticationRequestKind: Equatable, Sendable {
+enum AuthenticationRequestKind: String, CaseIterable, Codable, Hashable, Sendable {
     case sudo
     case localAuthentication
     case authorization
