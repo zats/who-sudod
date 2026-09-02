@@ -37,6 +37,7 @@ enum RequestMode: String {
     case authorizationAdmin = "authorization-admin"
     case authorizationPassword = "authorization-password"
     case workspaceAdmin = "workspace-admin"
+    case terminalPassword = "terminal-password"
 
     var localAuthenticationPolicy: LAPolicy? {
         switch self {
@@ -46,7 +47,7 @@ enum RequestMode: String {
             .deviceOwnerAuthenticationWithBiometrics
         case .localAccessControl, .localRight,
              .authorizationSessionOwner, .authorizationAdmin,
-             .authorizationPassword, .workspaceAdmin:
+             .authorizationPassword, .workspaceAdmin, .terminalPassword:
             nil
         }
     }
@@ -62,7 +63,7 @@ enum RequestMode: String {
         case .localRight:
             "Verify the Who Sudo'd live process tree with a transient right."
         case .authorizationSessionOwner, .authorizationAdmin,
-             .authorizationPassword, .workspaceAdmin:
+             .authorizationPassword, .workspaceAdmin, .terminalPassword:
             nil
         }
     }
@@ -70,7 +71,7 @@ enum RequestMode: String {
     var authorizationRight: String? {
         switch self {
         case .localOwner, .localBiometrics, .localAccessControl, .localRight,
-             .workspaceAdmin:
+             .workspaceAdmin, .terminalPassword:
             nil
         case .authorizationSessionOwner:
             "authenticate-session-owner"
@@ -92,6 +93,8 @@ enum RequestMode: String {
         case .authorizationSessionOwner, .authorizationAdmin,
              .authorizationPassword, .workspaceAdmin:
             ("securityAgent", "authorization", "authorizationLog")
+        case .terminalPassword:
+            ("terminalPassword", "sudo", "heuristicSudo")
         }
     }
 }
@@ -110,6 +113,20 @@ enum RequesterFailure: LocalizedError {
 func fail(_ message: String, status: Int32) -> Never {
     FileHandle.standardError.write(Data("\(message)\n".utf8))
     exit(status)
+}
+
+func executablePath(processID: pid_t) -> String? {
+    var pathBuffer = [CChar](repeating: 0, count: Int(MAXPATHLEN) * 4)
+    let pathLength = pathBuffer.withUnsafeMutableBytes { bytes in
+        proc_pidpath(processID, bytes.baseAddress, UInt32(bytes.count))
+    }
+    guard pathLength > 0 else {
+        return nil
+    }
+    return String(
+        decoding: pathBuffer.prefix { $0 != 0 }.map(UInt8.init(bitPattern:)),
+        as: UTF8.self
+    )
 }
 
 func liveProcess(_ pid: pid_t) -> LiveProcess? {
@@ -137,18 +154,9 @@ func liveProcess(_ pid: pid_t) -> LiveProcess? {
         return nil
     }
 
-    var pathBuffer = [CChar](repeating: 0, count: Int(MAXPATHLEN) * 4)
-    let pathLength = pathBuffer.withUnsafeMutableBytes { bytes in
-        proc_pidpath(pid, bytes.baseAddress, UInt32(bytes.count))
-    }
-    guard pathLength > 0 else {
+    guard let executablePath = executablePath(processID: pid) else {
         return nil
     }
-
-    let executablePath = String(
-        decoding: pathBuffer.prefix { $0 != 0 }.map(UInt8.init(bitPattern:)),
-        as: UTF8.self
-    )
 
     return LiveProcess(
         pid: pid,
@@ -193,7 +201,7 @@ func expectedTree(for requesterPID: pid_t, mode: RequestMode) throws -> Expected
         currentPID = process.parentPID
     }
     ancestry.reverse()
-    let rows = ancestry.enumerated().map { depth, process in
+    var rows = ancestry.enumerated().map { depth, process in
         let name = displayName(for: process)
         return ExpectedPresentationRow(
             candidateIndex: 0,
@@ -201,6 +209,17 @@ func expectedTree(for requesterPID: pid_t, mode: RequestMode) throws -> Expected
             process: name,
             pid: String(process.pid),
             executableOrCommand: process.executablePath
+        )
+    }
+    if mode == .terminalPassword {
+        rows.append(
+            ExpectedPresentationRow(
+                candidateIndex: 0,
+                depth: rows.count,
+                process: "stat",
+                pid: "—",
+                executableOrCommand: "/usr/bin/stat -f %Su /var/root"
+            )
         )
     }
     let metadata = mode.expectedMetadata
@@ -212,6 +231,251 @@ func expectedTree(for requesterPID: pid_t, mode: RequestMode) throws -> Expected
         candidateCount: 1,
         rows: rows
     )
+}
+
+func writeExpectedTree(
+    for requesterPID: pid_t,
+    mode: RequestMode,
+    to path: String
+) throws {
+    let expected = try expectedTree(for: requesterPID, mode: mode)
+    let encoder = JSONEncoder()
+    encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+    try encoder.encode(expected).write(
+        to: URL(fileURLWithPath: path),
+        options: .atomic
+    )
+}
+
+func writeExpectedTerminalPasswordTree(
+    requesterPID: pid_t,
+    sudoPID: pid_t,
+    to path: String
+) throws {
+    let base = try expectedTree(for: requesterPID, mode: .terminalPassword)
+    let sudoDepth = base.rows.count - 1
+    var rows = Array(base.rows.dropLast())
+    rows.append(
+        ExpectedPresentationRow(
+            candidateIndex: 0,
+            depth: sudoDepth,
+            process: "sudo",
+            pid: String(sudoPID),
+            executableOrCommand: "/usr/bin/sudo"
+        )
+    )
+    rows.append(
+        ExpectedPresentationRow(
+            candidateIndex: 0,
+            depth: sudoDepth + 1,
+            process: "stat",
+            pid: "—",
+            executableOrCommand: "/usr/bin/stat -f %Su /var/root"
+        )
+    )
+    let expected = ExpectedTree(
+        surfaceKind: base.surfaceKind,
+        inspectionState: base.inspectionState,
+        requestKind: base.requestKind,
+        attribution: base.attribution,
+        candidateCount: base.candidateCount,
+        rows: rows
+    )
+    let encoder = JSONEncoder()
+    encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+    try encoder.encode(expected).write(
+        to: URL(fileURLWithPath: path),
+        options: .atomic
+    )
+}
+
+func stopTerminalChild(_ processID: pid_t, masterDescriptor: Int32) {
+    close(masterDescriptor)
+    if kill(processID, 0) == 0 {
+        kill(processID, SIGTERM)
+    }
+    var status: Int32 = 0
+    _ = waitpid(processID, &status, 0)
+}
+
+func waitForSudoExecutable(
+    processID: pid_t,
+    timeout: TimeInterval
+) -> Bool {
+    let deadline = Date().addingTimeInterval(timeout)
+    while Date() < deadline {
+        if executablePath(processID: processID) == "/usr/bin/sudo" {
+            return true
+        }
+        Thread.sleep(forTimeInterval: 0.01)
+    }
+    return false
+}
+
+func processWasStopped(_ status: Int32) -> Bool {
+    let waitStatusMask: Int32 = 0x7f
+    let stoppedStatus: Int32 = 0x7f
+    let continuedSignal: Int32 = SIGCONT
+    let signal = (status >> 8) & 0xff
+    return status & waitStatusMask == stoppedStatus
+        && signal != continuedSignal
+}
+
+@MainActor
+func presentLiveCheckWindow(
+    _ window: NSWindow,
+    application: NSApplication
+) {
+    application.activate(ignoringOtherApps: true)
+    window.makeKeyAndOrderFront(nil)
+    window.orderFrontRegardless()
+}
+
+@MainActor
+final class TerminalPasswordRequestSupervisor: NSObject {
+    private let application: NSApplication
+    private let window: NSWindow
+    private let childProcessID: pid_t
+    private let masterDescriptor: Int32
+    private let deadline: Date
+    private var timer: Timer?
+
+    init(
+        application: NSApplication,
+        window: NSWindow,
+        childProcessID: pid_t,
+        masterDescriptor: Int32,
+        timeout: TimeInterval
+    ) {
+        self.application = application
+        self.window = window
+        self.childProcessID = childProcessID
+        self.masterDescriptor = masterDescriptor
+        self.deadline = Date().addingTimeInterval(timeout)
+    }
+
+    func run() -> Never {
+        presentLiveCheckWindow(window, application: application)
+        timer = Timer.scheduledTimer(
+            timeInterval: 0.02,
+            target: self,
+            selector: #selector(poll),
+            userInfo: nil,
+            repeats: true
+        )
+        application.run()
+        fail("The terminal-password live check stopped unexpectedly.", status: 70)
+    }
+
+    @objc private func poll() {
+        var status: Int32 = 0
+        let result = waitpid(childProcessID, &status, WNOHANG)
+        if result == childProcessID {
+            close(masterDescriptor)
+            fail("The password-only sudo request exited early.", status: 2)
+        }
+        if Date() >= deadline {
+            stopTerminalChild(childProcessID, masterDescriptor: masterDescriptor)
+            fail("The password-only sudo request timed out.", status: 124)
+        }
+        if !application.isActive {
+            presentLiveCheckWindow(window, application: application)
+        }
+    }
+}
+
+@MainActor
+func runTerminalPasswordRequest(
+    expectedPath: String,
+    timeout: TimeInterval
+) -> Never {
+    let application = NSApplication.shared
+    application.setActivationPolicy(.regular)
+    application.finishLaunching()
+
+    let window = NSWindow(
+        contentRect: CGRect(x: 0, y: 0, width: 520, height: 220),
+        styleMask: [.titled, .closable],
+        backing: .buffered,
+        defer: false
+    )
+    window.title = "Who Sudo'd terminal password live check"
+    window.collectionBehavior = [.moveToActiveSpace, .fullScreenAuxiliary]
+    let label = NSTextField(labelWithString: "A password-only sudo request is active in a private terminal.")
+    label.font = .systemFont(ofSize: 16, weight: .medium)
+    label.alignment = .center
+    label.frame = CGRect(x: 32, y: 84, width: 456, height: 52)
+    window.contentView?.addSubview(label)
+    window.center()
+    presentLiveCheckWindow(window, application: application)
+
+    var masterDescriptor: Int32 = -1
+    var childProcessID: pid_t = 0
+    childProcessID = forkpty(&masterDescriptor, nil, nil, nil)
+    guard childProcessID >= 0 else {
+        fail("Could not create the private terminal: \(String(cString: strerror(errno)))", status: 71)
+    }
+
+    if childProcessID == 0 {
+        raise(SIGSTOP)
+        let values = [
+            "/usr/bin/sudo",
+            "-k",
+            "--",
+            "/usr/bin/stat",
+            "-f",
+            "%Su",
+            "/var/root"
+        ]
+        var pointers = values.map { strdup($0) }
+        pointers.append(nil)
+        execv("/usr/bin/sudo", &pointers)
+        _exit(127)
+    }
+
+    var stoppedStatus: Int32 = 0
+    guard waitpid(childProcessID, &stoppedStatus, WUNTRACED) == childProcessID,
+          processWasStopped(stoppedStatus) else {
+        stopTerminalChild(childProcessID, masterDescriptor: masterDescriptor)
+        fail("The private terminal did not enter its warm-up state.", status: 70)
+    }
+    let warmUpDeadline = Date().addingTimeInterval(0.75)
+    while Date() < warmUpDeadline {
+        RunLoop.main.run(until: Date().addingTimeInterval(0.02))
+    }
+    guard kill(childProcessID, SIGCONT) == 0 else {
+        stopTerminalChild(childProcessID, masterDescriptor: masterDescriptor)
+        fail("Could not continue the private terminal.", status: 70)
+    }
+
+    guard waitForSudoExecutable(
+        processID: childProcessID,
+        timeout: 2
+    ) else {
+        stopTerminalChild(childProcessID, masterDescriptor: masterDescriptor)
+        fail("The private terminal did not start sudo.", status: 70)
+    }
+
+    do {
+        try writeExpectedTerminalPasswordTree(
+            requesterPID: getpid(),
+            sudoPID: childProcessID,
+            to: expectedPath
+        )
+    } catch {
+        stopTerminalChild(childProcessID, masterDescriptor: masterDescriptor)
+        fail("Could not write the expected process tree: \(error.localizedDescription)", status: 74)
+    }
+
+    print("mode=terminal-password requesterPID=\(getpid()) sudoPID=\(childProcessID)")
+    fflush(stdout)
+    TerminalPasswordRequestSupervisor(
+        application: application,
+        window: window,
+        childProcessID: childProcessID,
+        masterDescriptor: masterDescriptor,
+        timeout: timeout
+    ).run()
 }
 
 func requestAuthorizationRight(
@@ -298,7 +562,7 @@ guard arguments.count == 3,
       let timeout = TimeInterval(arguments[2]),
       timeout > 0 else {
     fail(
-        "Usage: WhoSudodLiveRequester <local-owner|local-biometrics|local-access-control|local-right|authorization-session-owner|authorization-admin|authorization-password|workspace-admin> EXPECTED_JSON TIMEOUT_SECONDS",
+        "Usage: WhoSudodLiveRequester <local-owner|local-biometrics|local-access-control|local-right|authorization-session-owner|authorization-admin|authorization-password|workspace-admin|terminal-password> EXPECTED_JSON TIMEOUT_SECONDS",
         status: 64
     )
 }
@@ -319,20 +583,27 @@ if let policy = mode.localAuthenticationPolicy {
     context = nil
 }
 
-do {
-    let expected = try expectedTree(for: getpid(), mode: mode)
-    let encoder = JSONEncoder()
-    encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-    try encoder.encode(expected).write(
-        to: URL(fileURLWithPath: arguments[1]),
-        options: .atomic
-    )
-} catch {
-    fail("Could not write the expected process tree: \(error.localizedDescription)", status: 74)
+if mode != .terminalPassword {
+    do {
+        try writeExpectedTree(
+            for: getpid(),
+            mode: mode,
+            to: arguments[1]
+        )
+    } catch {
+        fail("Could not write the expected process tree: \(error.localizedDescription)", status: 74)
+    }
 }
 
 print("mode=\(mode.rawValue) requesterPID=\(getpid())")
 fflush(stdout)
+
+if mode == .terminalPassword {
+    runTerminalPasswordRequest(
+        expectedPath: arguments[1],
+        timeout: timeout
+    )
+}
 
 if let policy = mode.localAuthenticationPolicy,
    let localizedReason = mode.localizedReason,

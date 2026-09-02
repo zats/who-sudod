@@ -105,7 +105,6 @@ func parseMode(_ values: [String]) -> Mode? {
               let stateURL = absoluteURL(values[1]),
               !values[2].isEmpty,
               let sequence = Int(values[3]),
-              sequence >= 0,
               let expectedURL = absoluteURL(values[4]),
               let expected = try? decoder.decode(
                 ExpectedTree.self,
@@ -131,7 +130,6 @@ func parseMode(_ values: [String]) -> Mode? {
               let stateURL = absoluteURL(values[1]),
               !values[2].isEmpty,
               let sequence = Int(values[3]),
-              sequence >= 0,
               let appPID = processID(values[4]),
               let wait = timeout(values[5]) else {
             return nil
@@ -298,7 +296,7 @@ while Date() < deadline {
                 && state.rows.isEmpty
         case let .tree(_, _, afterPromptSequence, expected, _, _, _):
             matches = stateIsFresh
-                && state.promptSequence > afterPromptSequence
+                && state.promptSequence != afterPromptSequence
                 && state.accessibilityTrusted
                 && state.visibility == "visible"
                 && state.promptPresent

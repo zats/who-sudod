@@ -4,13 +4,13 @@ set -euo pipefail
 umask 077
 
 if (( $# != 1 )); then
-    print -u2 "Usage: ${0:t} <local-owner|local-biometrics|local-access-control|local-right|authorization-session-owner|authorization-admin|authorization-password|workspace-admin>"
+    print -u2 "Usage: ${0:t} <local-owner|local-biometrics|local-access-control|local-right|authorization-session-owner|authorization-admin|authorization-password|workspace-admin|terminal-password>"
     exit 64
 fi
 
 request_mode="$1"
 case "${request_mode}" in
-    local-owner|local-biometrics|local-access-control|local-right|authorization-session-owner|authorization-admin|authorization-password|workspace-admin)
+    local-owner|local-biometrics|local-access-control|local-right|authorization-session-owner|authorization-admin|authorization-password|workspace-admin|terminal-password)
         ;;
     *)
         print -u2 "Unsupported authentication mode: ${request_mode}"
@@ -35,10 +35,18 @@ lock_path="/private/tmp/who-sudod-live-check.lock"
 lock_acquired=false
 app_process_id=0
 requester_process_id=0
+requester_timeout=15
+tree_timeout=10
+
+valid_process_id() {
+    local candidate="$1"
+    [[ "${candidate}" == <-> ]] && (( candidate > 0 ))
+}
 
 process_matches() {
     local process_id="$1"
     local expected_executable="$2"
+    valid_process_id "${process_id}" || return 1
     local executable
     executable="$(/bin/ps -ww -p "${process_id}" -o comm= 2>/dev/null || true)"
     [[ "${executable}" == "${expected_executable}" ]]
@@ -184,10 +192,15 @@ app_process_id="$!"
 "${waiter}" ready "${state_path}" "${run_identifier}" "${app_process_id}" 5
 baseline_sequence="$(/usr/bin/plutil -extract promptSequence raw "${state_path}")"
 
+if [[ "${request_mode}" == terminal-password ]]; then
+    requester_timeout=35
+    tree_timeout=30
+fi
+
 "${requester_executable}" \
     "${request_mode}" \
     "${expected_path}" \
-    15 \
+    "${requester_timeout}" \
     >"${requester_log}" 2>&1 &
 requester_process_id="$!"
 
@@ -213,7 +226,7 @@ fi
     "${expected_path}" \
     "${app_process_id}" \
     "${requester_process_id}" \
-    10 \
+    "${tree_timeout}" \
     --exact
 
 prompt_sequence="$(/usr/bin/plutil -extract promptSequence raw "${state_path}")"

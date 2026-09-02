@@ -68,4 +68,4 @@ targets:
         PRODUCT_NAME: WhoSudodLiveRequester
         GENERATE_INFOPLIST_FILE: YES
         INFOPLIST_KEY_CFBundleDisplayName: WhoSudodLiveRequester
-        INFOPLIST_KEY_LSUIElement: YES
+        INFOPLIST_KEY_LSUIElement: NO
