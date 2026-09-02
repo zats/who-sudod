@@ -25,6 +25,15 @@ struct AuthenticationPromptSessionStore {
     private var nextPromptSequence = 1
     private let capacity: Int
 
+    var accessibilityWindowIdentities: [AuthenticationWindowIdentity] {
+        sessions.keys.compactMap { key in
+            guard case .accessibility = key.windowIdentity else {
+                return nil
+            }
+            return key.windowIdentity
+        }
+    }
+
     init(capacity: Int = 32) {
         precondition(capacity > 0)
         self.capacity = capacity
@@ -135,6 +144,35 @@ struct AuthenticationPromptSessionStore {
 
         for window in windows where sessions[AuthenticationPromptSessionKey(window: window)] == nil {
             _ = activate(window: window, at: date)
+        }
+    }
+
+    mutating func observeVisibleAccessibilityWindows(
+        _ windows: [AuthenticationWindowSnapshot],
+        at date: Date,
+        requiredMissingObservations: Int = 3
+    ) {
+        precondition(requiredMissingObservations > 0)
+        let visibleKeys = Set(windows.map(AuthenticationPromptSessionKey.init(window:)))
+
+        for key in Array(sessions.keys) {
+            guard case .accessibility = key.windowIdentity,
+                  var session = sessions[key] else {
+                continue
+            }
+            if visibleKeys.contains(key) {
+                session.lastSeenAt = date
+                session.consecutiveMissingObservations = 0
+                sessions[key] = session
+                continue
+            }
+
+            session.consecutiveMissingObservations += 1
+            if session.consecutiveMissingObservations >= requiredMissingObservations {
+                sessions.removeValue(forKey: key)
+            } else {
+                sessions[key] = session
+            }
         }
     }
 

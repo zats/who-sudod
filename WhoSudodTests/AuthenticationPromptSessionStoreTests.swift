@@ -136,6 +136,21 @@ final class AuthenticationPromptSessionStoreTests: XCTestCase {
         XCTAssertNotNil(store.session(for: window))
     }
 
+    func testKeepsBackgroundAccessibilitySessionAndRemovesItAfterWindowCloses() {
+        var store = AuthenticationPromptSessionStore()
+        let window = window(identity: .accessibility(processID: 321))
+        store.update(window: window, processSnapshot: .empty, at: .distantPast)
+
+        XCTAssertEqual(store.accessibilityWindowIdentities, [window.identity])
+        store.observeVisibleAccessibilityWindows([window], at: Date(timeIntervalSince1970: 1))
+        store.observeVisibleAccessibilityWindows([], at: Date(timeIntervalSince1970: 2))
+        store.observeVisibleAccessibilityWindows([], at: Date(timeIntervalSince1970: 3))
+        XCTAssertEqual(store.session(for: window)?.processSnapshot, .empty)
+
+        store.observeVisibleAccessibilityWindows([], at: Date(timeIntervalSince1970: 4))
+        XCTAssertNil(store.session(for: window))
+    }
+
     private func window(
         id: CGWindowID,
         processID: pid_t = 321

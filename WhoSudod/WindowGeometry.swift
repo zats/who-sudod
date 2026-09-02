@@ -9,6 +9,7 @@ enum AuthorizationPanelMetrics {
 }
 
 enum ProcessPanelMetrics {
+    static let regularWindowCornerRadius: CGFloat = 12
     static let tableHorizontalInset: CGFloat = 12
     static let advancedContentWidth: CGFloat = 640
     static let simpleTableWidthFraction: CGFloat = 0.30
@@ -160,6 +161,65 @@ enum WindowGeometry {
         )
     }
 
+    static func standaloneSidecarFrame(
+        anchorFrame: CGRect,
+        visibleFrame: CGRect,
+        displayMode: ProcessDisplayMode,
+        desiredAdvancedContentWidth: CGFloat = ProcessPanelMetrics.advancedContentWidth,
+        desiredHeight: CGFloat = 320,
+        margin: CGFloat = 8
+    ) -> SidecarGeometry {
+        let controlMargin = ProcessPanelMetrics.modeControlWindowMargin
+        let maximumContentWidth = max(
+            0,
+            visibleFrame.width - 2 * margin - controlMargin
+        )
+        let desiredContentWidth = ProcessPanelMetrics.contentWidth(
+            for: displayMode,
+            availableAdvancedContentWidth: desiredAdvancedContentWidth
+        )
+        let contentWidth = min(desiredContentWidth, maximumContentWidth)
+        let panelWidth = contentWidth + controlMargin
+        let panelHeight = min(
+            desiredHeight,
+            max(0, visibleFrame.height - 2 * margin)
+        )
+        let rightSpace = max(0, visibleFrame.maxX - margin - anchorFrame.maxX)
+        let leftSpace = max(0, anchorFrame.minX - visibleFrame.minX - margin)
+
+        let side: SidecarSide
+        let x: CGFloat
+        if rightSpace >= panelWidth {
+            side = .right
+            x = anchorFrame.maxX + margin
+        } else if leftSpace >= panelWidth {
+            side = .left
+            x = anchorFrame.minX - margin - panelWidth
+        } else if anchorFrame.midX <= visibleFrame.midX {
+            side = .right
+            x = min(
+                visibleFrame.maxX - margin - panelWidth,
+                max(visibleFrame.minX + margin, anchorFrame.maxX - panelWidth)
+            )
+        } else {
+            side = .left
+            x = min(
+                visibleFrame.maxX - margin - panelWidth,
+                max(visibleFrame.minX + margin, anchorFrame.minX)
+            )
+        }
+        let y = min(
+            visibleFrame.maxY - margin - panelHeight,
+            max(visibleFrame.minY + margin, anchorFrame.midY - panelHeight / 2)
+        )
+
+        return SidecarGeometry(
+            frame: CGRect(x: x, y: y, width: panelWidth, height: panelHeight),
+            side: side,
+            reservedDialogWidth: 0
+        )
+    }
+
     static func transition(
         from source: SidecarGeometry,
         to destination: SidecarGeometry,
@@ -193,12 +253,65 @@ enum WindowGeometry {
         )
     }
 
+    static func standaloneTransition(
+        from source: SidecarGeometry,
+        to destination: SidecarGeometry
+    ) -> SidecarTransitionGeometry {
+        guard source.side != destination.side else {
+            return SidecarTransitionGeometry(
+                destination: destination,
+                departureBridge: nil,
+                arrivalBridge: nil
+            )
+        }
+
+        let bridgeContentWidth = min(
+            2 * ProcessPanelMetrics.tableHorizontalInset,
+            contentWidth(in: source),
+            contentWidth(in: destination)
+        )
+        return SidecarTransitionGeometry(
+            destination: destination,
+            departureBridge: standaloneBridge(
+                from: source,
+                contentWidth: bridgeContentWidth
+            ),
+            arrivalBridge: standaloneBridge(
+                from: destination,
+                contentWidth: bridgeContentWidth
+            )
+        )
+    }
+
     static func contentWidth(in geometry: SidecarGeometry) -> CGFloat {
         max(
             0,
             geometry.frame.width
                 - geometry.reservedDialogWidth
                 - ProcessPanelMetrics.modeControlWindowMargin
+        )
+    }
+
+    private static func standaloneBridge(
+        from geometry: SidecarGeometry,
+        contentWidth: CGFloat
+    ) -> SidecarGeometry {
+        let width = max(0, contentWidth) + ProcessPanelMetrics.modeControlWindowMargin
+        let x = switch geometry.side {
+        case .right:
+            geometry.frame.minX
+        case .left:
+            geometry.frame.maxX - width
+        }
+        return SidecarGeometry(
+            frame: CGRect(
+                x: x,
+                y: geometry.frame.minY,
+                width: width,
+                height: geometry.frame.height
+            ),
+            side: geometry.side,
+            reservedDialogWidth: 0
         )
     }
 

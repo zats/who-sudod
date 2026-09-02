@@ -30,6 +30,38 @@ struct WindowObservationStability: Equatable {
     }
 }
 
+enum TerminalPromptObservationResolution: Equatable {
+    case keepCurrent
+    case waitForCurrent
+    case select(ProcessIdentity)
+    case endCurrent
+    case noSelection
+
+    static func resolve(
+        current: ProcessIdentity?,
+        observed: [ProcessIdentity],
+        active: [ProcessIdentity],
+        currentMissConfirmed: Bool
+    ) -> TerminalPromptObservationResolution {
+        guard let current else {
+            return active.first.map(Self.select) ?? .noSelection
+        }
+        if observed.contains(current) {
+            if active.contains(current) {
+                return .keepCurrent
+            }
+            if let replacement = active.first {
+                return .select(replacement)
+            }
+            return .keepCurrent
+        }
+        guard currentMissConfirmed else {
+            return .waitForCurrent
+        }
+        return active.first.map(Self.select) ?? .endCurrent
+    }
+}
+
 enum AuthenticationWindowRecovery {
     static func continuousReplacement(
         for missingWindow: AuthenticationWindowSnapshot,
@@ -143,8 +175,15 @@ final class AuthorizationPromptMonitor: NSObject {
     private var nextProcessScanTime: TimeInterval = 0
     private var processScanTask: Task<Void, Never>?
     private var processScanSequence = 0
+    private var terminalPromptScanTask: Task<Void, Never>?
+    private var terminalPromptScanSequence = 0
+    private var terminalPromptIdentity: ProcessIdentity?
+    private var terminalPromptWindow: TerminalPromptWindowSnapshot?
+    private var nextTerminalPromptScanTime: TimeInterval = 0
+    private var nextTerminalPromptSequence = -1
     private var promptSequence = 0
     private var observationStability = WindowObservationStability()
+    private var terminalPromptStability = WindowObservationStability()
 
     init(
         displayMode: ProcessDisplayMode = .simple,
@@ -189,6 +228,8 @@ final class AuthorizationPromptMonitor: NSObject {
         timer?.invalidate()
         timer = nil
         cancelProcessScan()
+        cancelTerminalPromptScan()
+        resetTerminalPrompt(hidePanel: false, promptPresent: false)
         promptSessions.removeAll()
         eventMonitor.stop()
         DistributedNotificationCenter.default().removeObserver(self)
@@ -219,11 +260,15 @@ final class AuthorizationPromptMonitor: NSObject {
         guard AccessibilityFocusReader.isTrusted else {
             eventMonitor.stop()
             cancelProcessScan()
+            cancelTerminalPromptScan()
             target = nil
+            terminalPromptIdentity = nil
+            terminalPromptWindow = nil
             promptSessions.removeAll()
             targetFirstSeenAt = nil
             lastProcessSnapshot = .pending
             observationStability.reset()
+            terminalPromptStability.reset()
             panel.hide(promptPresent: false, accessibilityTrusted: false)
             panel.recordReadiness(accessibilityTrusted: false)
             report(isShowingPanel: false)
@@ -237,6 +282,12 @@ final class AuthorizationPromptMonitor: NSObject {
             .onScreenCoreGraphicsCandidates()
         promptSessions.observeVisibleCoreGraphicsWindows(
             visibleCoreGraphicsWindows,
+            at: observationDate
+        )
+        let visibleAccessibilityWindows = promptSessions.accessibilityWindowIdentities
+            .compactMap { AuthenticationWindowLocator.snapshot(identity: $0) }
+        promptSessions.observeVisibleAccessibilityWindows(
+            visibleAccessibilityWindows,
             at: observationDate
         )
         let frontmostCandidate = AuthenticationWindowLocator.frontmostCandidate(
@@ -307,12 +358,27 @@ final class AuthorizationPromptMonitor: NSObject {
             return
         }
 
+        if terminalPromptIdentity != nil {
+            if let candidate = frontmostCandidate {
+                resetTerminalPrompt(hidePanel: false, promptPresent: true)
+                activatePrompt(candidate, at: Date())
+                logger.notice(
+                    "Authentication window replaced terminal password prompt for PID \(candidate.processID, privacy: .public)"
+                )
+                updatePanel(for: candidate, now: now)
+                return
+            }
+            updateTerminalPrompt(now: now)
+            return
+        }
+
         guard forceDiscovery || now >= nextDiscoveryTime else {
             return
         }
         nextDiscoveryTime = now + 0.20
 
         guard let candidate = frontmostCandidate else {
+            startTerminalPromptScanIfNeeded(now: now)
             panel.recordReadiness(accessibilityTrusted: true)
             report(isShowingPanel: false)
             return
@@ -398,11 +464,18 @@ final class AuthorizationPromptMonitor: NSObject {
             return
         }
 
+        cancelProcessScan()
+        target = nil
+        targetFirstSeenAt = nil
+        lastProcessSnapshot = .pending
+        observationStability.reset()
+        nextDiscoveryTime = 0
         let wasPresented = panel.isPresented
         panel.hide(promptPresent: true, accessibilityTrusted: true)
         if wasPresented {
             report(isShowingPanel: false)
         }
+        startTerminalPromptScanIfNeeded(now: now)
     }
 
     private func startProcessScan(for window: AuthenticationWindowSnapshot) {
@@ -449,6 +522,159 @@ final class AuthorizationPromptMonitor: NSObject {
         }
     }
 
+    private func updateTerminalPrompt(now: TimeInterval) {
+        startTerminalPromptScanIfNeeded(now: now)
+        guard let identity = terminalPromptIdentity,
+              let chain = lastProcessSnapshot.candidates.first(where: {
+                  $0.requesterProcess.identity == identity
+              }) else {
+            hideTerminalPromptPanel()
+            return
+        }
+        let focusedWindow = TerminalPromptWindowLocator.focusedWindow(
+            for: chain,
+            preserving: terminalPromptWindow
+        )
+        guard let focusedWindow else {
+            hideTerminalPromptPanel()
+            return
+        }
+
+        self.terminalPromptWindow = focusedWindow
+        panel.showStandalone(
+            snapshot: AuthenticationProcessSnapshot(
+                candidates: [chain],
+                inspectionState: lastProcessSnapshot.inspectionState
+            ),
+            promptSequence: promptSequence,
+            anchorFrame: focusedWindow.frame,
+            visibleFrame: focusedWindow.visibleFrame
+        )
+        report(isShowingPanel: true)
+    }
+
+    private func hideTerminalPromptPanel() {
+        let wasPresented = panel.isPresented
+        panel.hide(promptPresent: true, accessibilityTrusted: true)
+        if wasPresented {
+            report(isShowingPanel: false)
+        }
+    }
+
+    private func startTerminalPromptScanIfNeeded(now: TimeInterval) {
+        guard target == nil,
+              terminalPromptScanTask == nil,
+              now >= nextTerminalPromptScanTime else {
+            return
+        }
+        nextTerminalPromptScanTime = now + 0.10
+        terminalPromptScanSequence += 1
+        let sequence = terminalPromptScanSequence
+        let preferredAnchor = terminalPromptIdentity.flatMap { identity in
+            lastProcessSnapshot.candidates.first(where: {
+                $0.requesterProcess.identity == identity
+            })?.anchor
+        }
+        terminalPromptScanTask = Task { [weak self, scanner] in
+            let observed = await scanner.terminalPasswordSudoSnapshot(
+                preferredAnchor: preferredAnchor
+            )
+            guard !Task.isCancelled,
+                  let self,
+                  self.terminalPromptScanSequence == sequence else {
+                return
+            }
+            self.terminalPromptScanTask = nil
+            guard self.target == nil else {
+                return
+            }
+
+            let observedIdentities = observed.candidates.map {
+                $0.requesterProcess.identity
+            }
+            let currentWasObserved = self.terminalPromptIdentity.map {
+                observedIdentities.contains($0)
+            } ?? false
+            let currentMissConfirmed: Bool
+            if self.terminalPromptIdentity == nil || currentWasObserved {
+                self.terminalPromptStability.recordConfirmation()
+                currentMissConfirmed = false
+            } else {
+                currentMissConfirmed = self.terminalPromptStability.recordMiss()
+            }
+
+            var activeWindows: [ProcessIdentity: TerminalPromptWindowSnapshot] = [:]
+            for chain in observed.candidates {
+                let identity = chain.requesterProcess.identity
+                let window: TerminalPromptWindowSnapshot?
+                if identity == self.terminalPromptIdentity {
+                    window = TerminalPromptWindowLocator.focusedWindow(
+                        for: chain,
+                        preserving: self.terminalPromptWindow
+                    )
+                } else {
+                    window = TerminalPromptWindowLocator.focusedWindow(for: chain)
+                }
+                if let window {
+                    activeWindows[identity] = window
+                }
+            }
+            let activeIdentities = observedIdentities.filter {
+                activeWindows[$0] != nil
+            }
+            let resolution = TerminalPromptObservationResolution.resolve(
+                current: self.terminalPromptIdentity,
+                observed: observedIdentities,
+                active: activeIdentities,
+                currentMissConfirmed: currentMissConfirmed
+            )
+
+            switch resolution {
+            case .keepCurrent:
+                guard let currentIdentity = self.terminalPromptIdentity,
+                      let chain = observed.candidates.first(where: {
+                          $0.requesterProcess.identity == currentIdentity
+                      }) else {
+                    return
+                }
+                self.lastProcessSnapshot = AuthenticationProcessSnapshot(
+                    candidates: [chain],
+                    inspectionState: observed.inspectionState
+                )
+                if let activeWindow = activeWindows[currentIdentity] {
+                    self.terminalPromptWindow = activeWindow
+                }
+                self.updateTerminalPrompt(now: ProcessInfo.processInfo.systemUptime)
+            case .waitForCurrent:
+                self.updateTerminalPrompt(now: ProcessInfo.processInfo.systemUptime)
+            case let .select(identity):
+                guard let chain = observed.candidates.first(where: {
+                    $0.requesterProcess.identity == identity
+                }), let window = activeWindows[identity] else {
+                    return
+                }
+                self.terminalPromptStability.recordConfirmation()
+                self.terminalPromptIdentity = identity
+                self.terminalPromptWindow = window
+                self.promptSequence = self.nextTerminalPromptSequence
+                self.nextTerminalPromptSequence -= 1
+                self.lastProcessSnapshot = AuthenticationProcessSnapshot(
+                    candidates: [chain],
+                    inspectionState: observed.inspectionState
+                )
+                self.logger.notice(
+                    "Terminal password sudo detected for PID \(chain.requesterProcess.pid, privacy: .public)"
+                )
+                self.updateTerminalPrompt(now: ProcessInfo.processInfo.systemUptime)
+            case .endCurrent:
+                self.logger.notice("Terminal password sudo ended")
+                self.resetTerminalPrompt(hidePanel: true, promptPresent: false)
+            case .noSelection:
+                break
+            }
+        }
+    }
+
     private func isAuthenticationWindowFocused(
         _ window: AuthenticationWindowSnapshot
     ) -> Bool? {
@@ -481,6 +707,10 @@ final class AuthorizationPromptMonitor: NSObject {
         at date: Date
     ) {
         cancelProcessScan()
+        cancelTerminalPromptScan()
+        terminalPromptIdentity = nil
+        terminalPromptWindow = nil
+        terminalPromptStability.reset()
         let session = promptSessions.activate(window: window, at: date)
         target = window
         targetFirstSeenAt = session.firstSeenAt
@@ -516,6 +746,34 @@ final class AuthorizationPromptMonitor: NSObject {
         processScanSequence += 1
         processScanTask.cancel()
         self.processScanTask = nil
+    }
+
+    private func cancelTerminalPromptScan() {
+        guard let terminalPromptScanTask else {
+            return
+        }
+        terminalPromptScanSequence += 1
+        terminalPromptScanTask.cancel()
+        self.terminalPromptScanTask = nil
+    }
+
+    private func resetTerminalPrompt(
+        hidePanel: Bool,
+        promptPresent: Bool
+    ) {
+        cancelTerminalPromptScan()
+        terminalPromptIdentity = nil
+        terminalPromptWindow = nil
+        terminalPromptStability.reset()
+        nextTerminalPromptScanTime = 0
+        lastProcessSnapshot = .pending
+        if hidePanel {
+            panel.hide(
+                promptPresent: promptPresent,
+                accessibilityTrusted: AccessibilityFocusReader.isTrusted
+            )
+            report(isShowingPanel: false)
+        }
     }
 
     private func report(isShowingPanel: Bool) {

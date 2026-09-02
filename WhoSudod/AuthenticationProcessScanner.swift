@@ -70,13 +70,257 @@ enum AuthenticationAnchorPriority {
     }
 }
 
+struct TerminalPasswordSudoState: Equatable, Sendable {
+    let executablePath: String?
+    let realUserID: uid_t
+    let effectiveUserID: uid_t
+    let signedInUserID: uid_t
+    let hasControllingTerminal: Bool
+    let processGroupID: pid_t
+    let terminalForegroundProcessGroupID: pid_t
+    let terminalEchoEnabled: Bool?
+    let terminalCanonicalInputEnabled: Bool?
+    let hasChild: Bool
+    let invocationUsesTerminalPassword: Bool
+}
+
+enum TerminalPasswordSudoPolicy {
+    static func isWaitingForPassword(_ state: TerminalPasswordSudoState) -> Bool {
+        state.executablePath == "/usr/bin/sudo"
+            && state.realUserID == state.signedInUserID
+            && state.effectiveUserID == 0
+            && state.hasControllingTerminal
+            && state.processGroupID > 0
+            && state.processGroupID == state.terminalForegroundProcessGroupID
+            && state.terminalEchoEnabled == false
+            && state.terminalCanonicalInputEnabled == true
+            && !state.hasChild
+            && state.invocationUsesTerminalPassword
+    }
+}
+
+struct TerminalPasswordModeTracker {
+    private static let requiredInitialPasswordModeObservations = 3
+    private static let recentTransitionInterval: TimeInterval = 2
+    private static let noBaselineInterval: TimeInterval = 5
+
+    private(set) var previousPasswordModeByDevice: [dev_t: Bool] = [:]
+    private(set) var confirmedSudoIdentities: Set<ProcessIdentity> = []
+    private var noBaselineFallbackSudoIdentities: Set<ProcessIdentity> = []
+    private var initialPasswordModeObservationsByIdentity: [ProcessIdentity: Int] = [:]
+    private var recentPasswordModeTransitionByDevice: [dev_t: TimeInterval] = [:]
+    private var recentNoBaselinePasswordModeByDevice: [dev_t: TimeInterval] = [:]
+
+    mutating func update(
+        passwordModeByDevice: [dev_t: Bool],
+        sudoDeviceByIdentity: [ProcessIdentity: dev_t],
+        eligibleSudoIdentities: Set<ProcessIdentity>,
+        liveSudoIdentities: Set<ProcessIdentity>,
+        newNoBaselineFallbackSudoIdentities: Set<ProcessIdentity> = [],
+        observationTime: TimeInterval = ProcessInfo.processInfo.systemUptime
+    ) -> Set<ProcessIdentity> {
+        recentPasswordModeTransitionByDevice = recentPasswordModeTransitionByDevice.filter {
+            $0.value >= observationTime && passwordModeByDevice[$0.key] == true
+        }
+        recentNoBaselinePasswordModeByDevice = recentNoBaselinePasswordModeByDevice.filter {
+            $0.value >= observationTime && passwordModeByDevice[$0.key] == true
+        }
+        for (device, passwordModeActive) in passwordModeByDevice where passwordModeActive {
+            if previousPasswordModeByDevice[device] == false {
+                recentPasswordModeTransitionByDevice[device] = observationTime
+                    + Self.recentTransitionInterval
+            } else if previousPasswordModeByDevice[device] == nil {
+                recentNoBaselinePasswordModeByDevice[device] = observationTime
+                    + Self.noBaselineInterval
+            }
+        }
+
+        confirmedSudoIdentities.formIntersection(liveSudoIdentities)
+        noBaselineFallbackSudoIdentities.formIntersection(liveSudoIdentities)
+        for identity in newNoBaselineFallbackSudoIdentities {
+            guard let device = sudoDeviceByIdentity[identity],
+                  recentNoBaselinePasswordModeByDevice[device] != nil else {
+                continue
+            }
+            noBaselineFallbackSudoIdentities.insert(identity)
+        }
+        initialPasswordModeObservationsByIdentity = initialPasswordModeObservationsByIdentity.filter {
+            eligibleSudoIdentities.contains($0.key)
+                && noBaselineFallbackSudoIdentities.contains($0.key)
+        }
+
+        for (identity, device) in sudoDeviceByIdentity
+        where eligibleSudoIdentities.contains(identity)
+            && passwordModeByDevice[device] == true {
+            if confirmedSudoIdentities.contains(identity)
+                || previousPasswordModeByDevice[device] == false
+                || recentPasswordModeTransitionByDevice[device] != nil {
+                confirmedSudoIdentities.insert(identity)
+                continue
+            }
+            guard noBaselineFallbackSudoIdentities.contains(identity) else {
+                continue
+            }
+            let observationCount = min(
+                initialPasswordModeObservationsByIdentity[identity, default: 0] + 1,
+                Self.requiredInitialPasswordModeObservations
+            )
+            initialPasswordModeObservationsByIdentity[identity] = observationCount
+            if observationCount == Self.requiredInitialPasswordModeObservations {
+                confirmedSudoIdentities.insert(identity)
+            }
+        }
+
+        confirmedSudoIdentities = confirmedSudoIdentities.filter { identity in
+            guard let device = sudoDeviceByIdentity[identity],
+                  let passwordModeActive = passwordModeByDevice[device] else {
+                return false
+            }
+            return liveSudoIdentities.contains(identity) && passwordModeActive
+        }
+        previousPasswordModeByDevice = passwordModeByDevice
+        return confirmedSudoIdentities
+    }
+}
+
+enum TerminalPasswordSudoArgumentPolicy {
+    private static let excludedLongOptions: Set<String> = [
+        "--askpass",
+        "--non-interactive",
+        "--stdin"
+    ]
+    private static let longOptionsWithArguments: Set<String> = [
+        "--chdir",
+        "--chroot",
+        "--close-from",
+        "--command-timeout",
+        "--group",
+        "--host",
+        "--login-class",
+        "--other-user",
+        "--prompt",
+        "--role",
+        "--type",
+        "--user"
+    ]
+    private static let shortOptionsWithArguments: Set<Character> = [
+        "C", "D", "g", "h", "p", "R", "r", "T", "t", "U", "u"
+    ]
+
+    static func usesTerminalPassword(_ arguments: [String]?) -> Bool {
+        guard let arguments, !arguments.isEmpty else {
+            return false
+        }
+
+        var index = 1
+        while index < arguments.count {
+            let argument = arguments[index]
+            if argument == "--" {
+                return true
+            }
+            if !argument.hasPrefix("-") || argument == "-" {
+                return true
+            }
+            if argument.hasPrefix("--") {
+                let option = String(argument.split(separator: "=", maxSplits: 1)[0])
+                if excludedLongOptions.contains(option) {
+                    return false
+                }
+                let hasInlineValue = argument.contains("=")
+                index += longOptionsWithArguments.contains(option) && !hasInlineValue ? 2 : 1
+                continue
+            }
+
+            let options = Array(argument.dropFirst())
+            for (offset, option) in options.enumerated() {
+                if option == "A" || option == "S" || option == "n" {
+                    return false
+                }
+                if shortOptionsWithArguments.contains(option) {
+                    index += offset == options.count - 1 ? 2 : 1
+                    break
+                }
+                if offset == options.count - 1 {
+                    index += 1
+                }
+            }
+        }
+        return true
+    }
+}
+
+struct TerminalInputMode: Equatable, Sendable {
+    let echoEnabled: Bool
+    let canonicalInputEnabled: Bool
+
+    var isPasswordEntryMode: Bool {
+        !echoEnabled && canonicalInputEnabled
+    }
+}
+
+enum TerminalInputModeReader {
+    static func read(device: dev_t) -> TerminalInputMode? {
+        let noDevice = dev_t(bitPattern: UInt32.max)
+        guard device != noDevice else {
+            return nil
+        }
+
+        var nameBuffer = [CChar](repeating: 0, count: Int(MAXPATHLEN))
+        guard devname_r(
+            device,
+            S_IFCHR,
+            &nameBuffer,
+            Int32(nameBuffer.count)
+        ) != nil else {
+            return nil
+        }
+        let deviceName = String(
+            decoding: nameBuffer.prefix { $0 != 0 }.map(UInt8.init(bitPattern:)),
+            as: UTF8.self
+        )
+        guard !deviceName.isEmpty, !deviceName.contains("/") else {
+            return nil
+        }
+
+        let descriptor = open(
+            "/dev/\(deviceName)",
+            O_RDONLY | O_NONBLOCK | O_NOCTTY | O_CLOEXEC
+        )
+        guard descriptor >= 0 else {
+            return nil
+        }
+        defer { close(descriptor) }
+
+        var status = stat()
+        guard fstat(descriptor, &status) == 0,
+              status.st_rdev == device,
+              status.st_mode & S_IFMT == S_IFCHR else {
+            return nil
+        }
+
+        var attributes = termios()
+        guard tcgetattr(descriptor, &attributes) == 0 else {
+            return nil
+        }
+        return TerminalInputMode(
+            echoEnabled: attributes.c_lflag & tcflag_t(ECHO) != 0,
+            canonicalInputEnabled: attributes.c_lflag & tcflag_t(ICANON) != 0
+        )
+    }
+}
+
 actor AuthenticationProcessScanner {
     private struct KernelProcess {
         let pid: pid_t
         let parentPID: pid_t
         let realUserID: uid_t
+        let effectiveUserID: uid_t
         let name: String
         let startTime: ProcessStartTime
+        let hasControllingTerminal: Bool
+        let controllingTerminalDevice: dev_t
+        let processGroupID: pid_t
+        let terminalForegroundProcessGroupID: pid_t
     }
 
     private struct Requester {
@@ -87,6 +331,7 @@ actor AuthenticationProcessScanner {
 
     private var processArgumentsByIdentity: [ProcessIdentity: [String]] = [:]
     private var processArgumentReadAttempts: [ProcessIdentity: Int] = [:]
+    private var terminalPasswordModeTracker = TerminalPasswordModeTracker()
 
     func snapshot(
         realUserID: uid_t = getuid(),
@@ -190,6 +435,113 @@ actor AuthenticationProcessScanner {
                 }
                 return true
             }
+        return await snapshot(
+            for: sudoProcesses.map { process in
+                Requester(
+                    process: process,
+                    requestKind: .sudo,
+                    attribution: .heuristicSudo
+                )
+            },
+            in: catalog
+        )
+    }
+
+    func terminalPasswordSudoSnapshot(
+        realUserID: uid_t = getuid(),
+        preferredAnchor: AuthenticationRequestAnchor? = nil
+    ) async -> AuthenticationProcessSnapshot {
+        let catalog: [pid_t: KernelProcess]
+        do {
+            catalog = try captureKernelProcesses()
+        } catch {
+            return .unavailable
+        }
+
+        pruneProcessArgumentCache(using: catalog)
+        let inputModeByDevice = terminalInputModes(
+            in: catalog,
+            signedInUserID: realUserID
+        )
+        let passwordModeByDevice = inputModeByDevice.mapValues(\.isPasswordEntryMode)
+        let liveSudoProcesses = catalog.values.filter { process in
+            process.name == "sudo" && isSameProcessImage(process)
+        }
+        let liveSudoIdentities = Set(liveSudoProcesses.map(identity(for:)))
+        let childrenByParent = Dictionary(
+            grouping: catalog.values,
+            by: \.parentPID
+        )
+        var sudoDeviceByIdentity: [ProcessIdentity: dev_t] = [:]
+        var eligibleSudoProcesses: [KernelProcess] = []
+        var noBaselineFallbackSudoIdentities: Set<ProcessIdentity> = []
+        let observationDate = Date()
+        for process in liveSudoProcesses {
+            let path = executablePath(for: process.pid)
+            guard path == "/usr/bin/sudo",
+                  process.realUserID == realUserID,
+                  process.effectiveUserID == 0,
+                  process.hasControllingTerminal,
+                  process.processGroupID > 0,
+                  process.processGroupID == process.terminalForegroundProcessGroupID else {
+                continue
+            }
+            let identity = identity(for: process)
+            sudoDeviceByIdentity[identity] = process.controllingTerminalDevice
+            let childExists = (childrenByParent[process.pid] ?? []).contains { child in
+                child.pid != process.pid && child.startTime >= process.startTime
+            }
+            let arguments = processArguments(for: process)
+            let invocationUsesTerminalPassword = TerminalPasswordSudoArgumentPolicy
+                .usesTerminalPassword(arguments)
+            let state = TerminalPasswordSudoState(
+                executablePath: path,
+                realUserID: process.realUserID,
+                effectiveUserID: process.effectiveUserID,
+                signedInUserID: realUserID,
+                hasControllingTerminal: process.hasControllingTerminal,
+                processGroupID: process.processGroupID,
+                terminalForegroundProcessGroupID: process.terminalForegroundProcessGroupID,
+                terminalEchoEnabled: inputModeByDevice[
+                    process.controllingTerminalDevice
+                ]?.echoEnabled,
+                terminalCanonicalInputEnabled: inputModeByDevice[
+                    process.controllingTerminalDevice
+                ]?.canonicalInputEnabled,
+                hasChild: childExists,
+                invocationUsesTerminalPassword: invocationUsesTerminalPassword
+            )
+            if TerminalPasswordSudoPolicy.isWaitingForPassword(state) {
+                eligibleSudoProcesses.append(process)
+                let processAge = observationDate.timeIntervalSince(process.startTime.date)
+                if processAge >= 0,
+                   processAge <= 5,
+                   let arguments,
+                   SudoInvocationParser.command(from: arguments) != nil {
+                    noBaselineFallbackSudoIdentities.insert(identity)
+                }
+            }
+        }
+        let eligibleSudoIdentities = Set(eligibleSudoProcesses.map(identity(for:)))
+        let transitionConfirmedIdentities = terminalPasswordModeTracker.update(
+            passwordModeByDevice: passwordModeByDevice,
+            sudoDeviceByIdentity: sudoDeviceByIdentity,
+            eligibleSudoIdentities: eligibleSudoIdentities,
+            liveSudoIdentities: liveSudoIdentities,
+            newNoBaselineFallbackSudoIdentities: noBaselineFallbackSudoIdentities
+        )
+        var sudoProcesses = eligibleSudoProcesses
+            .filter { transitionConfirmedIdentities.contains(identity(for: $0)) }
+            .sorted(by: newestFirst)
+
+        if let preferredIdentity = preferredAnchor?.identity,
+           let preferredIndex = sudoProcesses.firstIndex(where: {
+               identity(for: $0) == preferredIdentity
+           }), preferredIndex != sudoProcesses.startIndex {
+            let preferred = sudoProcesses.remove(at: preferredIndex)
+            sudoProcesses.insert(preferred, at: sudoProcesses.startIndex)
+        }
+
         return await snapshot(
             for: sudoProcesses.map { process in
                 Requester(
@@ -321,6 +673,26 @@ actor AuthenticationProcessScanner {
         }
     }
 
+    private func terminalInputModes(
+        in catalog: [pid_t: KernelProcess],
+        signedInUserID: uid_t
+    ) -> [dev_t: TerminalInputMode] {
+        let devices = Set(
+            catalog.values.compactMap { process -> dev_t? in
+                guard process.realUserID == signedInUserID,
+                      process.hasControllingTerminal else {
+                    return nil
+                }
+                return process.controllingTerminalDevice
+            }
+        )
+        return Dictionary(
+            uniqueKeysWithValues: devices.compactMap { device in
+                TerminalInputModeReader.read(device: device).map { (device, $0) }
+            }
+        )
+    }
+
     private func captureKernelProcesses() throws -> [pid_t: KernelProcess] {
         var managementInformationBase: [Int32] = [CTL_KERN, KERN_PROC, KERN_PROC_ALL, 0]
 
@@ -361,11 +733,16 @@ actor AuthenticationProcessScanner {
             pid: entry.kp_proc.p_pid,
             parentPID: entry.kp_eproc.e_ppid,
             realUserID: entry.kp_eproc.e_pcred.p_ruid,
+            effectiveUserID: entry.kp_eproc.e_ucred.cr_uid,
             name: cString(from: entry.kp_proc.p_comm),
             startTime: ProcessStartTime(
                 seconds: UInt64(max(0, start.tv_sec)),
                 microseconds: UInt64(max(0, start.tv_usec))
-            )
+            ),
+            hasControllingTerminal: entry.kp_eproc.e_flag & EPROC_CTTY != 0,
+            controllingTerminalDevice: entry.kp_eproc.e_tdev,
+            processGroupID: entry.kp_eproc.e_pgid,
+            terminalForegroundProcessGroupID: entry.kp_eproc.e_tpgid
         )
     }
 
@@ -544,4 +921,5 @@ actor AuthenticationProcessScanner {
             String(decoding: bytes.prefix { $0 != 0 }, as: UTF8.self)
         }
     }
+
 }

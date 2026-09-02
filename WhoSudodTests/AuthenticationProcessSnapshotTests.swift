@@ -3,6 +3,345 @@ import XCTest
 @testable import WhoSudod
 
 final class AuthenticationProcessSnapshotTests: XCTestCase {
+    func testTerminalPasswordSudoPolicyAcceptsForegroundPasswordInputMode() {
+        XCTAssertTrue(
+            TerminalPasswordSudoPolicy.isWaitingForPassword(
+                terminalPasswordState()
+            )
+        )
+    }
+
+    func testTerminalPasswordSudoPolicyRejectsIncompleteSignals() {
+        XCTAssertFalse(
+            TerminalPasswordSudoPolicy.isWaitingForPassword(
+                terminalPasswordState(executablePath: "/tmp/sudo")
+            )
+        )
+        XCTAssertFalse(
+            TerminalPasswordSudoPolicy.isWaitingForPassword(
+                terminalPasswordState(realUserID: 0)
+            )
+        )
+        XCTAssertFalse(
+            TerminalPasswordSudoPolicy.isWaitingForPassword(
+                terminalPasswordState(signedInUserID: 501)
+            )
+        )
+        XCTAssertFalse(
+            TerminalPasswordSudoPolicy.isWaitingForPassword(
+                terminalPasswordState(effectiveUserID: 502)
+            )
+        )
+        XCTAssertFalse(
+            TerminalPasswordSudoPolicy.isWaitingForPassword(
+                terminalPasswordState(hasControllingTerminal: false)
+            )
+        )
+        XCTAssertFalse(
+            TerminalPasswordSudoPolicy.isWaitingForPassword(
+                terminalPasswordState(processGroupID: 700, terminalForegroundProcessGroupID: 701)
+            )
+        )
+        XCTAssertFalse(
+            TerminalPasswordSudoPolicy.isWaitingForPassword(
+                terminalPasswordState(processGroupID: 0, terminalForegroundProcessGroupID: 0)
+            )
+        )
+        XCTAssertFalse(
+            TerminalPasswordSudoPolicy.isWaitingForPassword(
+                terminalPasswordState(terminalEchoEnabled: true)
+            )
+        )
+        XCTAssertFalse(
+            TerminalPasswordSudoPolicy.isWaitingForPassword(
+                terminalPasswordState(terminalEchoEnabled: nil)
+            )
+        )
+        XCTAssertFalse(
+            TerminalPasswordSudoPolicy.isWaitingForPassword(
+                terminalPasswordState(terminalCanonicalInputEnabled: false)
+            )
+        )
+        XCTAssertFalse(
+            TerminalPasswordSudoPolicy.isWaitingForPassword(
+                terminalPasswordState(terminalCanonicalInputEnabled: nil)
+            )
+        )
+        XCTAssertFalse(
+            TerminalPasswordSudoPolicy.isWaitingForPassword(
+                terminalPasswordState(hasChild: true)
+            )
+        )
+        XCTAssertFalse(
+            TerminalPasswordSudoPolicy.isWaitingForPassword(
+                terminalPasswordState(invocationUsesTerminalPassword: false)
+            )
+        )
+    }
+
+    func testTerminalPasswordArgumentPolicyRejectsNonTerminalSudoModes() {
+        for arguments in [
+            ["sudo", "-A", "id"],
+            ["sudo", "-S", "id"],
+            ["sudo", "-n", "id"],
+            ["sudo", "-An", "id"],
+            ["sudo", "--askpass", "id"],
+            ["sudo", "--stdin", "id"],
+            ["sudo", "--non-interactive", "id"],
+            ["sudo", "-u", "root", "-S", "id"],
+            ["sudo", "--user", "root", "--stdin", "id"]
+        ] {
+            XCTAssertFalse(
+                TerminalPasswordSudoArgumentPolicy.usesTerminalPassword(arguments),
+                "Expected rejection for \(arguments)"
+            )
+        }
+
+        XCTAssertTrue(
+            TerminalPasswordSudoArgumentPolicy.usesTerminalPassword(
+                ["sudo", "echo", "-n"]
+            )
+        )
+        XCTAssertTrue(
+            TerminalPasswordSudoArgumentPolicy.usesTerminalPassword(
+                ["sudo", "--", "echo", "-n"]
+            )
+        )
+        XCTAssertFalse(TerminalPasswordSudoArgumentPolicy.usesTerminalPassword(nil))
+    }
+
+    func testTerminalInputModeReaderDistinguishesPasswordModeFromShellRawMode() throws {
+        var master: Int32 = -1
+        var slave: Int32 = -1
+        XCTAssertEqual(openpty(&master, &slave, nil, nil, nil), 0)
+        defer {
+            close(master)
+            close(slave)
+        }
+
+        var status = stat()
+        XCTAssertEqual(fstat(slave, &status), 0)
+        var original = termios()
+        XCTAssertEqual(tcgetattr(slave, &original), 0)
+        defer { _ = tcsetattr(slave, TCSANOW, &original) }
+
+        var attributes = original
+        attributes.c_lflag |= tcflag_t(ECHO | ICANON)
+        XCTAssertEqual(tcsetattr(slave, TCSANOW, &attributes), 0)
+        XCTAssertEqual(
+            TerminalInputModeReader.read(device: status.st_rdev),
+            TerminalInputMode(echoEnabled: true, canonicalInputEnabled: true)
+        )
+
+        attributes.c_lflag &= ~tcflag_t(ECHO)
+        XCTAssertEqual(tcsetattr(slave, TCSANOW, &attributes), 0)
+        XCTAssertEqual(
+            TerminalInputModeReader.read(device: status.st_rdev)?.isPasswordEntryMode,
+            true
+        )
+
+        attributes.c_lflag &= ~tcflag_t(ICANON)
+        XCTAssertEqual(tcsetattr(slave, TCSANOW, &attributes), 0)
+        XCTAssertEqual(
+            TerminalInputModeReader.read(device: status.st_rdev)?.isPasswordEntryMode,
+            false
+        )
+    }
+
+    func testTerminalPasswordModeTrackerRequiresInactiveToActiveTransition() {
+        let identity = ProcessIdentity(
+            pid: 700,
+            startTime: ProcessStartTime(seconds: 10, microseconds: 0)
+        )
+        let device = dev_t(123)
+        var tracker = TerminalPasswordModeTracker()
+
+        XCTAssertEqual(
+            tracker.update(
+                passwordModeByDevice: [device: true],
+                sudoDeviceByIdentity: [identity: device],
+                eligibleSudoIdentities: [identity],
+                liveSudoIdentities: [identity]
+            ),
+            []
+        )
+
+        XCTAssertEqual(
+            tracker.update(
+                passwordModeByDevice: [device: false],
+                sudoDeviceByIdentity: [:],
+                eligibleSudoIdentities: [],
+                liveSudoIdentities: []
+            ),
+            []
+        )
+        XCTAssertEqual(
+            tracker.update(
+                passwordModeByDevice: [device: true],
+                sudoDeviceByIdentity: [identity: device],
+                eligibleSudoIdentities: [identity],
+                liveSudoIdentities: [identity]
+            ),
+            [identity]
+        )
+    }
+
+    func testTerminalPasswordModeTrackerKeepsOnlyLiveActiveSudo() {
+        let identity = ProcessIdentity(
+            pid: 700,
+            startTime: ProcessStartTime(seconds: 10, microseconds: 0)
+        )
+        let device = dev_t(123)
+        var tracker = TerminalPasswordModeTracker()
+        _ = tracker.update(
+            passwordModeByDevice: [device: false],
+            sudoDeviceByIdentity: [:],
+            eligibleSudoIdentities: [],
+            liveSudoIdentities: []
+        )
+        _ = tracker.update(
+            passwordModeByDevice: [device: true],
+            sudoDeviceByIdentity: [identity: device],
+            eligibleSudoIdentities: [identity],
+            liveSudoIdentities: [identity]
+        )
+
+        XCTAssertEqual(
+            tracker.update(
+                passwordModeByDevice: [device: true],
+                sudoDeviceByIdentity: [identity: device],
+                eligibleSudoIdentities: [identity],
+                liveSudoIdentities: [identity]
+            ),
+            [identity]
+        )
+        XCTAssertEqual(
+            tracker.update(
+                passwordModeByDevice: [device: false],
+                sudoDeviceByIdentity: [identity: device],
+                eligibleSudoIdentities: [],
+                liveSudoIdentities: [identity]
+            ),
+            []
+        )
+    }
+
+    func testTerminalPasswordModeTrackerKeepsTransitionUntilSudoAppears() {
+        let identity = ProcessIdentity(
+            pid: 700,
+            startTime: ProcessStartTime(seconds: 10, microseconds: 0)
+        )
+        let device = dev_t(123)
+        var tracker = TerminalPasswordModeTracker()
+
+        _ = tracker.update(
+            passwordModeByDevice: [device: false],
+            sudoDeviceByIdentity: [:],
+            eligibleSudoIdentities: [],
+            liveSudoIdentities: []
+        )
+        _ = tracker.update(
+            passwordModeByDevice: [device: true],
+            sudoDeviceByIdentity: [:],
+            eligibleSudoIdentities: [],
+            liveSudoIdentities: []
+        )
+
+        XCTAssertEqual(
+            tracker.update(
+                passwordModeByDevice: [device: true],
+                sudoDeviceByIdentity: [identity: device],
+                eligibleSudoIdentities: [identity],
+                liveSudoIdentities: [identity]
+            ),
+            [identity]
+        )
+    }
+
+    func testTerminalPasswordModeTrackerConfirmsSustainedInitialActiveState() {
+        let identity = ProcessIdentity(
+            pid: 700,
+            startTime: ProcessStartTime(seconds: 10, microseconds: 0)
+        )
+        let device = dev_t(123)
+        var tracker = TerminalPasswordModeTracker()
+
+        for observation in 0..<2 {
+            XCTAssertEqual(
+                tracker.update(
+                    passwordModeByDevice: [device: true],
+                    sudoDeviceByIdentity: [identity: device],
+                    eligibleSudoIdentities: [identity],
+                    liveSudoIdentities: [identity],
+                    newNoBaselineFallbackSudoIdentities: observation == 0 ? [identity] : []
+                ),
+                []
+            )
+        }
+        XCTAssertEqual(
+            tracker.update(
+                passwordModeByDevice: [device: true],
+                sudoDeviceByIdentity: [identity: device],
+                eligibleSudoIdentities: [identity],
+                liveSudoIdentities: [identity]
+            ),
+            [identity]
+        )
+    }
+
+    func testTerminalPasswordModeTrackerDoesNotInferUnmarkedActiveSudo() {
+        let identity = ProcessIdentity(
+            pid: 700,
+            startTime: ProcessStartTime(seconds: 10, microseconds: 0)
+        )
+        let device = dev_t(123)
+        var tracker = TerminalPasswordModeTracker()
+
+        for _ in 0..<4 {
+            XCTAssertEqual(
+                tracker.update(
+                    passwordModeByDevice: [device: true],
+                    sudoDeviceByIdentity: [identity: device],
+                    eligibleSudoIdentities: [identity],
+                    liveSudoIdentities: [identity]
+                ),
+                []
+            )
+        }
+    }
+
+    func testTerminalPasswordModeTrackerRejectsLateFallbackOnKnownActiveDevice() {
+        let identity = ProcessIdentity(
+            pid: 700,
+            startTime: ProcessStartTime(seconds: 10, microseconds: 0)
+        )
+        let device = dev_t(123)
+        var tracker = TerminalPasswordModeTracker()
+
+        for observation in 0..<6 {
+            _ = tracker.update(
+                passwordModeByDevice: [device: true],
+                sudoDeviceByIdentity: [:],
+                eligibleSudoIdentities: [],
+                liveSudoIdentities: [],
+                observationTime: TimeInterval(observation)
+            )
+        }
+        for observation in 6..<10 {
+            XCTAssertEqual(
+                tracker.update(
+                    passwordModeByDevice: [device: true],
+                    sudoDeviceByIdentity: [identity: device],
+                    eligibleSudoIdentities: [identity],
+                    liveSudoIdentities: [identity],
+                    newNoBaselineFallbackSudoIdentities: [identity],
+                    observationTime: TimeInterval(observation)
+                ),
+                []
+            )
+        }
+    }
+
     func testHeuristicPreferredAnchorAllowsNewLogEvidenceToTakePriority() {
         let anchor = AuthenticationRequestAnchor(
             identity: ProcessIdentity(
@@ -572,6 +911,34 @@ final class AuthenticationProcessSnapshotTests: XCTestCase {
             executablePath: path,
             startTime: ProcessStartTime(seconds: start, microseconds: 0),
             processArguments: processArguments
+        )
+    }
+
+    private func terminalPasswordState(
+        executablePath: String? = "/usr/bin/sudo",
+        realUserID: uid_t = 502,
+        effectiveUserID: uid_t = 0,
+        signedInUserID: uid_t = 502,
+        hasControllingTerminal: Bool = true,
+        processGroupID: pid_t = 700,
+        terminalForegroundProcessGroupID: pid_t = 700,
+        terminalEchoEnabled: Bool? = false,
+        terminalCanonicalInputEnabled: Bool? = true,
+        hasChild: Bool = false,
+        invocationUsesTerminalPassword: Bool = true
+    ) -> TerminalPasswordSudoState {
+        TerminalPasswordSudoState(
+            executablePath: executablePath,
+            realUserID: realUserID,
+            effectiveUserID: effectiveUserID,
+            signedInUserID: signedInUserID,
+            hasControllingTerminal: hasControllingTerminal,
+            processGroupID: processGroupID,
+            terminalForegroundProcessGroupID: terminalForegroundProcessGroupID,
+            terminalEchoEnabled: terminalEchoEnabled,
+            terminalCanonicalInputEnabled: terminalCanonicalInputEnabled,
+            hasChild: hasChild,
+            invocationUsesTerminalPassword: invocationUsesTerminalPassword
         )
     }
 

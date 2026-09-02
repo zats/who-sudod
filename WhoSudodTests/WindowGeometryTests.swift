@@ -7,9 +7,33 @@ final class WindowGeometryTests: XCTestCase {
         XCTAssertEqual(AuthorizationPanelMetrics.systemDialogCornerRadius, 26)
         XCTAssertEqual(AuthorizationPanelMetrics.dialogPadding, 20)
         XCTAssertEqual(AuthorizationPanelMetrics.envelopeCornerRadius, 46)
+        XCTAssertEqual(ProcessPanelMetrics.regularWindowCornerRadius, 12)
         XCTAssertEqual(
             ProcessPanelMetrics.modeControlWindowMargin,
             ProcessPanelMetrics.modeControlDiameter / 2
+        )
+    }
+
+    func testPlacementSelectsCornerRadiusForItsHostWindow() {
+        let frame = CGRect(x: 100, y: 100, width: 400, height: 300)
+        let visibleFrame = CGRect(x: 0, y: 24, width: 1920, height: 1056)
+
+        let authentication = ProcessPanelPlacement.authentication(
+            frame: frame,
+            visibleFrame: visibleFrame
+        )
+        let standalone = ProcessPanelPlacement.standalone(
+            anchorFrame: frame,
+            visibleFrame: visibleFrame
+        )
+
+        XCTAssertEqual(
+            authentication.materialCornerRadius,
+            AuthorizationPanelMetrics.envelopeCornerRadius
+        )
+        XCTAssertEqual(
+            standalone.materialCornerRadius,
+            ProcessPanelMetrics.regularWindowCornerRadius
         )
     }
 
@@ -77,6 +101,81 @@ final class WindowGeometryTests: XCTestCase {
 
         XCTAssertEqual(result.side, .right)
         XCTAssertEqual(result.frame, CGRect(x: 490, y: 280, width: 782, height: 377))
+    }
+
+    func testStandaloneSidecarUsesNoDialogReservation() {
+        let result = WindowGeometry.standaloneSidecarFrame(
+            anchorFrame: CGRect(x: 100, y: 100, width: 600, height: 600),
+            visibleFrame: CGRect(x: 0, y: 24, width: 1920, height: 1056),
+            displayMode: .fullTree
+        )
+
+        XCTAssertEqual(result.side, .right)
+        XCTAssertEqual(result.reservedDialogWidth, 0)
+        XCTAssertEqual(result.frame.minX, 708)
+        XCTAssertEqual(result.frame.height, 320)
+    }
+
+    func testStandaloneSidecarUsesLeftSideNearRightScreenEdge() {
+        let anchor = CGRect(x: 1400, y: 100, width: 500, height: 600)
+        let result = WindowGeometry.standaloneSidecarFrame(
+            anchorFrame: anchor,
+            visibleFrame: CGRect(x: 0, y: 24, width: 1920, height: 1056),
+            displayMode: .fullTree
+        )
+
+        XCTAssertEqual(result.side, .left)
+        XCTAssertEqual(result.frame.maxX, anchor.minX - 8)
+        XCTAssertEqual(result.reservedDialogWidth, 0)
+    }
+
+    func testStandaloneSidecarFallsBackInsideAFullScreenAnchor() {
+        let visibleFrame = CGRect(x: 0, y: 24, width: 1280, height: 776)
+        let simple = WindowGeometry.standaloneSidecarFrame(
+            anchorFrame: visibleFrame,
+            visibleFrame: visibleFrame,
+            displayMode: .simple
+        )
+        let advanced = WindowGeometry.standaloneSidecarFrame(
+            anchorFrame: visibleFrame,
+            visibleFrame: visibleFrame,
+            displayMode: .fullTree
+        )
+
+        XCTAssertTrue(visibleFrame.contains(simple.frame))
+        XCTAssertTrue(visibleFrame.contains(advanced.frame))
+        XCTAssertLessThan(simple.frame.width, advanced.frame.width)
+        XCTAssertEqual(simple.reservedDialogWidth, 0)
+        XCTAssertEqual(advanced.reservedDialogWidth, 0)
+    }
+
+    func testStandaloneSideChangeRetractsBeforeMoving() throws {
+        let source = SidecarGeometry(
+            frame: CGRect(x: 700, y: 200, width: 230, height: 320),
+            side: .right,
+            reservedDialogWidth: 0
+        )
+        let destination = SidecarGeometry(
+            frame: CGRect(x: 40, y: 200, width: 654, height: 320),
+            side: .left,
+            reservedDialogWidth: 0
+        )
+
+        let transition = WindowGeometry.standaloneTransition(
+            from: source,
+            to: destination
+        )
+        let departure = try XCTUnwrap(transition.departureBridge)
+        let arrival = try XCTUnwrap(transition.arrivalBridge)
+
+        XCTAssertEqual(departure.side, .right)
+        XCTAssertEqual(departure.frame.minX, source.frame.minX)
+        XCTAssertLessThan(departure.frame.width, source.frame.width)
+        XCTAssertEqual(arrival.side, .left)
+        XCTAssertEqual(arrival.frame.maxX, destination.frame.maxX)
+        XCTAssertLessThan(arrival.frame.width, destination.frame.width)
+        XCTAssertEqual(departure.reservedDialogWidth, 0)
+        XCTAssertEqual(arrival.reservedDialogWidth, 0)
     }
 
     func testSimpleTableWidthIsThirtyPercentOfAdvancedTableWidthOnRight() {

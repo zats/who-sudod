@@ -2,6 +2,15 @@ import XCTest
 @testable import WhoSudod
 
 final class WindowObservationStabilityTests: XCTestCase {
+    private let first = ProcessIdentity(
+        pid: 100,
+        startTime: ProcessStartTime(seconds: 10, microseconds: 0)
+    )
+    private let second = ProcessIdentity(
+        pid: 200,
+        startTime: ProcessStartTime(seconds: 20, microseconds: 0)
+    )
+
     func testRequiresThreeConsecutiveMisses() {
         var stability = WindowObservationStability(requiredMisses: 3)
 
@@ -19,6 +28,90 @@ final class WindowObservationStabilityTests: XCTestCase {
 
         XCTAssertFalse(stability.recordMiss())
         XCTAssertEqual(stability.consecutiveMisses, 1)
+    }
+
+    func testTerminalPromptKeepsObservedCurrentRequest() {
+        XCTAssertEqual(
+            TerminalPromptObservationResolution.resolve(
+                current: first,
+                observed: [second, first],
+                active: [first],
+                currentMissConfirmed: false
+            ),
+            .keepCurrent
+        )
+    }
+
+    func testTerminalPromptHandsOffOnlyToASeparatelyActiveRequest() {
+        XCTAssertEqual(
+            TerminalPromptObservationResolution.resolve(
+                current: first,
+                observed: [second, first],
+                active: [second],
+                currentMissConfirmed: false
+            ),
+            .select(second)
+        )
+        XCTAssertEqual(
+            TerminalPromptObservationResolution.resolve(
+                current: first,
+                observed: [second, first],
+                active: [],
+                currentMissConfirmed: false
+            ),
+            .keepCurrent
+        )
+    }
+
+    func testTerminalPromptDebouncesMissingCurrentBeforeReplacement() {
+        XCTAssertEqual(
+            TerminalPromptObservationResolution.resolve(
+                current: first,
+                observed: [second],
+                active: [second],
+                currentMissConfirmed: false
+            ),
+            .waitForCurrent
+        )
+        XCTAssertEqual(
+            TerminalPromptObservationResolution.resolve(
+                current: first,
+                observed: [second],
+                active: [second],
+                currentMissConfirmed: true
+            ),
+            .select(second)
+        )
+    }
+
+    func testTerminalPromptStartsAndEndsOnlyWithAnActiveSelection() {
+        XCTAssertEqual(
+            TerminalPromptObservationResolution.resolve(
+                current: nil,
+                observed: [first],
+                active: [],
+                currentMissConfirmed: false
+            ),
+            .noSelection
+        )
+        XCTAssertEqual(
+            TerminalPromptObservationResolution.resolve(
+                current: nil,
+                observed: [first],
+                active: [first],
+                currentMissConfirmed: false
+            ),
+            .select(first)
+        )
+        XCTAssertEqual(
+            TerminalPromptObservationResolution.resolve(
+                current: first,
+                observed: [],
+                active: [],
+                currentMissConfirmed: true
+            ),
+            .endCurrent
+        )
     }
 }
 

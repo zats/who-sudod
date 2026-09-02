@@ -12,14 +12,63 @@ enum ProcessTableAnimationPolicy {
     }
 }
 
+enum ProcessPanelPlacement {
+    case authentication(frame: CGRect, visibleFrame: CGRect)
+    case standalone(anchorFrame: CGRect, visibleFrame: CGRect)
+
+    var materialCornerRadius: CGFloat {
+        switch self {
+        case .authentication:
+            AuthorizationPanelMetrics.envelopeCornerRadius
+        case .standalone:
+            ProcessPanelMetrics.regularWindowCornerRadius
+        }
+    }
+
+    func geometry(displayMode: ProcessDisplayMode) -> SidecarGeometry {
+        switch self {
+        case let .authentication(frame, visibleFrame):
+            WindowGeometry.sidecarFrame(
+                authenticationFrame: frame,
+                visibleFrame: visibleFrame,
+                displayMode: displayMode
+            )
+        case let .standalone(anchorFrame, visibleFrame):
+            WindowGeometry.standaloneSidecarFrame(
+                anchorFrame: anchorFrame,
+                visibleFrame: visibleFrame,
+                displayMode: displayMode
+            )
+        }
+    }
+
+    func transition(
+        from source: SidecarGeometry,
+        to destination: SidecarGeometry
+    ) -> SidecarTransitionGeometry {
+        switch self {
+        case let .authentication(frame, _):
+            WindowGeometry.transition(
+                from: source,
+                to: destination,
+                authenticationFrame: frame
+            )
+        case .standalone:
+            WindowGeometry.standaloneTransition(
+                from: source,
+                to: destination
+            )
+        }
+    }
+}
+
 @MainActor
 final class ProcessTreePanelController: NSWindowController {
     private let content: CompanionContentView
     private var displayMode: ProcessDisplayMode
     private var currentSnapshot: AuthenticationProcessSnapshot?
     private var currentSurfaceKind: AuthenticationSurfaceKind?
-    private var currentAuthenticationFrame: CGRect?
-    private var currentVisibleFrame: CGRect?
+    private var currentPlacement: ProcessPanelPlacement?
     private var currentSidecar: SidecarGeometry?
     private var currentAttachmentSide: SidecarSide?
     private var geometryTransitionGeneration = 0
@@ -64,6 +113,40 @@ final class ProcessTreePanelController: NSWindowController {
         authenticationFrame: CGRect,
         visibleFrame: CGRect
     ) {
+        show(
+            snapshot: snapshot,
+            promptSequence: promptSequence,
+            surfaceKind: surfaceKind,
+            placement: .authentication(
+                frame: authenticationFrame,
+                visibleFrame: visibleFrame
+            )
+        )
+    }
+
+    func showStandalone(
+        snapshot: AuthenticationProcessSnapshot,
+        promptSequence: Int,
+        anchorFrame: CGRect,
+        visibleFrame: CGRect
+    ) {
+        show(
+            snapshot: snapshot,
+            promptSequence: promptSequence,
+            surfaceKind: .terminalPassword,
+            placement: .standalone(
+                anchorFrame: anchorFrame,
+                visibleFrame: visibleFrame
+            )
+        )
+    }
+
+    private func show(
+        snapshot: AuthenticationProcessSnapshot,
+        promptSequence: Int,
+        surfaceKind: AuthenticationSurfaceKind,
+        placement: ProcessPanelPlacement
+    ) {
         guard let window else {
             return
         }
@@ -79,14 +162,10 @@ final class ProcessTreePanelController: NSWindowController {
         }
         currentPromptSequence = promptSequence
         currentSurfaceKind = surfaceKind
-        currentAuthenticationFrame = authenticationFrame
-        currentVisibleFrame = visibleFrame
+        currentPlacement = placement
+        content.setMaterialCornerRadius(placement.materialCornerRadius)
 
-        let target = WindowGeometry.sidecarFrame(
-            authenticationFrame: authenticationFrame,
-            visibleFrame: visibleFrame,
-            displayMode: displayMode
-        )
+        let target = placement.geometry(displayMode: displayMode)
         if let activeGeometryTransitionTarget {
             if !approximatelyEqual(target, activeGeometryTransitionTarget) {
                 cancelGeometryTransition()
@@ -135,25 +214,19 @@ final class ProcessTreePanelController: NSWindowController {
         content.setDisplayMode(mode)
         guard isPresented,
               let window,
-              let currentAuthenticationFrame,
-              let currentVisibleFrame else {
+              let currentPlacement else {
             return
         }
 
-        let destination = WindowGeometry.sidecarFrame(
-            authenticationFrame: currentAuthenticationFrame,
-            visibleFrame: currentVisibleFrame,
-            displayMode: mode
-        )
+        let destination = currentPlacement.geometry(displayMode: mode)
         let source = SidecarGeometry(
             frame: window.frame,
             side: currentAttachmentSide ?? currentSidecar?.side ?? destination.side,
             reservedDialogWidth: destination.reservedDialogWidth
         )
-        let transition = WindowGeometry.transition(
+        let transition = currentPlacement.transition(
             from: source,
-            to: destination,
-            authenticationFrame: currentAuthenticationFrame
+            to: destination
         )
         startGeometryTransition(transition)
     }
@@ -430,6 +503,10 @@ final class CompanionContentView: NSView {
 
     var renderedTable: RenderedProcessTable {
         processTable.renderedTable()
+    }
+
+    func setMaterialCornerRadius(_ cornerRadius: CGFloat) {
+        material.layer?.cornerRadius = cornerRadius
     }
 
     func setAttachmentSide(_ side: SidecarSide, reservedDialogWidth: CGFloat) {

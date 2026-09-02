@@ -280,6 +280,34 @@ final class AuthenticationWindowLocatorTests: XCTestCase {
         )
     }
 
+    @MainActor
+    func testTerminalPromptUsesFrontmostWindowWhenFramesMatch() throws {
+        let frame = CGRect(x: 100, y: 200, width: 900, height: 640)
+        let frontmost = terminalWindow(windowID: 91, frame: frame)
+        let covered = terminalWindow(windowID: 92, frame: frame)
+
+        XCTAssertEqual(
+            TerminalPromptWindowLocator.frontmostMatch(
+                in: [frontmost, covered],
+                focusedFrame: frame
+            ),
+            frontmost
+        )
+    }
+
+    private func terminalWindow(
+        windowID: CGWindowID,
+        frame: CGRect
+    ) -> TerminalPromptWindowSnapshot {
+        TerminalPromptWindowSnapshot(
+            windowID: windowID,
+            processID: 321,
+            coreGraphicsFrame: frame,
+            frame: frame,
+            visibleFrame: display.visibleFrame
+        )
+    }
+
     private func authenticationWindow(
         identity: AuthenticationWindowIdentity,
         processID: pid_t,

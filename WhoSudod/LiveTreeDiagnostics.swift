@@ -173,6 +173,8 @@ struct LiveTreeDiagnostics {
             "securityAgent"
         case .localAuthentication:
             "localAuthentication"
+        case .terminalPassword:
+            "terminalPassword"
         }
     }
 

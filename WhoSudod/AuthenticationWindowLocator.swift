@@ -5,6 +5,7 @@ import Darwin
 enum AuthenticationSurfaceKind: Hashable, Sendable {
     case securityAgent
     case localAuthentication
+    case terminalPassword
 }
 
 enum AuthenticationWindowIdentity: Hashable, Sendable {
@@ -19,6 +20,164 @@ struct AuthenticationWindowSnapshot: Equatable {
     let coreGraphicsFrame: CGRect
     let frame: CGRect
     let visibleFrame: CGRect
+}
+
+struct TerminalPromptWindowSnapshot: Equatable {
+    let windowID: CGWindowID
+    let processID: pid_t
+    let coreGraphicsFrame: CGRect
+    let frame: CGRect
+    let visibleFrame: CGRect
+}
+
+@MainActor
+enum TerminalPromptWindowLocator {
+    static func focusedWindow(
+        for chain: ProcessChain,
+        preserving currentWindow: TerminalPromptWindowSnapshot?
+    ) -> TerminalPromptWindowSnapshot? {
+        guard let currentWindow else {
+            return focusedWindow(for: chain)
+        }
+        if let focused = focusedSnapshot(for: currentWindow) {
+            return focused
+        }
+        guard currentSnapshot(for: currentWindow) == nil else {
+            return nil
+        }
+        return focusedWindow(for: chain)
+    }
+
+    static func focusedWindow(for chain: ProcessChain) -> TerminalPromptWindowSnapshot? {
+        for process in chain.processes.reversed() {
+            guard process.pid != chain.requesterProcess.pid,
+                  let executablePath = process.executablePath,
+                  ProcessTablePresentationBuilder.enclosingApplicationPath(
+                      for: executablePath
+                  ) != nil,
+                  NSRunningApplication(processIdentifier: process.pid)?.isActive == true,
+                  let focusedFrame = AccessibilityFocusReader.focusedWindowFrame(
+                      processID: process.pid
+                  ),
+                  focusedFrame.width >= 180,
+                  focusedFrame.height >= 120,
+                  let window = frontmostMatchingWindow(
+                      processID: process.pid,
+                      focusedFrame: focusedFrame
+                  ), AccessibilityFocusReader.isFocusedWindow(
+                      processID: window.processID,
+                      matchingCoreGraphicsFrame: window.coreGraphicsFrame,
+                      tolerance: 8
+                  ) == true else {
+                continue
+            }
+            return window
+        }
+        return nil
+    }
+
+    static func focusedSnapshot(
+        for window: TerminalPromptWindowSnapshot
+    ) -> TerminalPromptWindowSnapshot? {
+        guard let updated = currentSnapshot(for: window), NSRunningApplication(
+            processIdentifier: updated.processID
+        )?.isActive == true, AccessibilityFocusReader.isFocusedWindow(
+            processID: updated.processID,
+            matchingCoreGraphicsFrame: updated.coreGraphicsFrame,
+            tolerance: 8
+        ) == true else {
+            return nil
+        }
+        return updated
+    }
+
+    private static func currentSnapshot(
+        for window: TerminalPromptWindowSnapshot
+    ) -> TerminalPromptWindowSnapshot? {
+        let windowInfo = CGWindowListCopyWindowInfo(
+            [.optionIncludingWindow],
+            window.windowID
+        ) as? [[String: Any]] ?? []
+        return snapshot(
+            from: windowInfo,
+            expectedProcessID: window.processID
+        )
+    }
+
+    private static func frontmostMatchingWindow(
+        processID: pid_t,
+        focusedFrame: CGRect
+    ) -> TerminalPromptWindowSnapshot? {
+        let windowInfo = CGWindowListCopyWindowInfo(
+            [.optionOnScreenOnly, .excludeDesktopElements],
+            .zero
+        ) as? [[String: Any]] ?? []
+        let candidates = windowInfo.compactMap { info -> TerminalPromptWindowSnapshot? in
+            snapshot(
+                from: [info],
+                expectedProcessID: processID
+            )
+        }
+        return frontmostMatch(in: candidates, focusedFrame: focusedFrame)
+    }
+
+    static func frontmostMatch(
+        in candidates: [TerminalPromptWindowSnapshot],
+        focusedFrame: CGRect
+    ) -> TerminalPromptWindowSnapshot? {
+        candidates.first {
+            framesMatch($0.coreGraphicsFrame, focusedFrame)
+        }
+    }
+
+    private static func framesMatch(_ lhs: CGRect, _ rhs: CGRect) -> Bool {
+        abs(lhs.minX - rhs.minX) <= 8
+            && abs(lhs.minY - rhs.minY) <= 8
+            && abs(lhs.width - rhs.width) <= 8
+            && abs(lhs.height - rhs.height) <= 8
+    }
+
+    private static func snapshot(
+        from windowInfo: [[String: Any]],
+        expectedProcessID: pid_t
+    ) -> TerminalPromptWindowSnapshot? {
+        let displays = AuthenticationWindowLocator.currentDisplays()
+        for info in windowInfo {
+            guard let processIDNumber = info[kCGWindowOwnerPID as String] as? NSNumber,
+                  processIDNumber.int32Value == expectedProcessID,
+                  let windowIDNumber = info[kCGWindowNumber as String] as? NSNumber,
+                  let bounds = info[kCGWindowBounds as String] as? [String: Any],
+                  (info[kCGWindowIsOnscreen as String] as? NSNumber)?.boolValue == true else {
+                continue
+            }
+            let frame = CGRect(
+                x: number(bounds["X"]),
+                y: number(bounds["Y"]),
+                width: number(bounds["Width"]),
+                height: number(bounds["Height"])
+            )
+            guard frame.width >= 180,
+                  frame.height >= 120,
+                  let geometry = WindowGeometry.convert(
+                      coreGraphicsFrame: frame,
+                      displays: displays
+                  ) else {
+                continue
+            }
+            return TerminalPromptWindowSnapshot(
+                windowID: CGWindowID(windowIDNumber.uint32Value),
+                processID: expectedProcessID,
+                coreGraphicsFrame: frame,
+                frame: geometry.frame,
+                visibleFrame: geometry.visibleFrame
+            )
+        }
+        return nil
+    }
+
+    private static func number(_ value: Any?) -> CGFloat {
+        CGFloat((value as? NSNumber)?.doubleValue ?? 0)
+    }
 }
 
 enum AuthenticationWindowContinuity {
@@ -283,7 +442,7 @@ enum AuthenticationWindowLocator {
         )
     }
 
-    private static func currentDisplays() -> [DisplayGeometry] {
+    static func currentDisplays() -> [DisplayGeometry] {
         NSScreen.screens.compactMap { screen in
             guard let number = screen.deviceDescription[.init("NSScreenNumber")] as? NSNumber else {
                 return nil
