@@ -66,7 +66,7 @@ enum ProcessCommandLineParser {
 
 enum AuthenticationAnchorPriority {
     static func isAuthoritative(_ anchor: AuthenticationRequestAnchor) -> Bool {
-        anchor.attribution.isLogAttributed
+        anchor.attribution.isAuthoritative
     }
 }
 
@@ -561,6 +561,40 @@ actor AuthenticationProcessScanner {
                     attribution: .heuristicSudo
                 )
             },
+            in: catalog
+        )
+    }
+
+    func pamSudoSnapshot(
+        processID: pid_t,
+        realUserID: uid_t = getuid()
+    ) async -> AuthenticationProcessSnapshot {
+        let catalog: [pid_t: KernelProcess]
+        do {
+            catalog = try captureKernelProcesses()
+        } catch {
+            return .unavailable
+        }
+
+        pruneProcessArgumentCache(using: catalog)
+        guard let process = catalog[processID],
+              process.name == "sudo",
+              process.realUserID == realUserID,
+              process.effectiveUserID == 0,
+              process.hasControllingTerminal,
+              isSameProcessImage(process),
+              executablePath(for: process.pid) == "/usr/bin/sudo" else {
+            return .empty
+        }
+
+        return await snapshot(
+            for: [
+                Requester(
+                    process: process,
+                    requestKind: .sudo,
+                    attribution: .pamConversation
+                )
+            ],
             in: catalog
         )
     }

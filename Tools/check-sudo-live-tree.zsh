@@ -151,6 +151,7 @@ lock_acquired=true
 
 require_no_existing_app
 
+Tools/generate-project.zsh
 /usr/bin/xcodebuild \
     -project WhoSudod.xcodeproj \
     -scheme WhoSudod \

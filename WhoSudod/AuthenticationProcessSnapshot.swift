@@ -222,9 +222,10 @@ enum AuthenticationRequestKind: String, CaseIterable, Codable, Hashable, Sendabl
 enum AuthenticationAttribution: Equatable, Sendable {
     case localAuthenticationLog
     case authorizationLog
+    case pamConversation
     case heuristicSudo
 
-    var isLogAttributed: Bool {
+    var isAuthoritative: Bool {
         self != .heuristicSudo
     }
 }
@@ -305,7 +306,7 @@ enum ProcessSnapshotSelection {
             )
         }
         guard !observed.candidates.isEmpty else {
-            if let pinned = current.candidates.first, pinned.attribution.isLogAttributed {
+            if let pinned = current.candidates.first, pinned.attribution.isAuthoritative {
                 return AuthenticationProcessSnapshot(
                     candidates: [pinned],
                     inspectionState: .requesterExited

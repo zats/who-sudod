@@ -210,6 +210,8 @@ struct LiveTreeDiagnostics {
             "localAuthenticationLog"
         case .authorizationLog:
             "authorizationLog"
+        case .pamConversation:
+            "pamConversation"
         case .heuristicSudo:
             "heuristicSudo"
         }

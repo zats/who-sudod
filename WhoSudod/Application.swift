@@ -1,6 +1,7 @@
 import AppKit
 import ApplicationServices
 import Permiso
+import os
 
 enum ApplicationLaunchContext {
     static func shouldStartMonitor(environment: [String: String]) -> Bool {
@@ -31,11 +32,25 @@ enum WhoSudodApplication {
 }
 
 @MainActor
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
+    private enum PAMMenuAction {
+        case install
+        case repair
+        case uninstall
+        case none
+    }
+
+    private let logger = Logger(subsystem: "com.zats.WhoSudo", category: "Application")
     private let ignoredApplications = IgnoredApplicationsStore()
+    private let pamIntegration = PAMIntegrationController()
     private var monitor: AuthorizationPromptMonitor?
+    private var pamConversationServer: PAMConversationServer?
+    private var pamConversationError: String?
     private var statusItem: NSStatusItem?
     private var accessMenuItem: NSMenuItem?
+    private var pamIntegrationMenuItem: NSMenuItem?
+    private var pamIntegrationStatusMenuItem: NSMenuItem?
+    private var pamMenuAction = PAMMenuAction.none
     private var settingsWindowController: IgnoredApplicationsSettingsWindowController?
     private var settingsKeyboardMonitor: Any?
     private var displayMode = ProcessDisplayMode.initial()
@@ -50,6 +65,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         configureMainMenu()
         configureStatusItem()
         configureSettingsKeyboardMonitor()
+        pamIntegration.didChange = { [weak self] snapshot in
+            self?.updatePAMIntegrationMenu(snapshot)
+        }
+        pamIntegration.refresh()
 
         let monitor = AuthorizationPromptMonitor(
             displayMode: displayMode,
@@ -62,6 +81,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         )
         self.monitor = monitor
+        startPAMConversationServer()
         monitor.start()
 
         if !AccessibilityFocusReader.isTrusted {
@@ -76,6 +96,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             NSEvent.removeMonitor(settingsKeyboardMonitor)
         }
         monitor?.stop()
+        pamConversationServer?.stop()
     }
 
     func applicationShouldHandleReopen(
@@ -304,13 +325,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(settings)
         menu.addItem(.separator())
 
+        let pamIntegration = NSMenuItem(
+            title: "Install PAM Password Input…",
+            action: #selector(togglePAMIntegration),
+            keyEquivalent: ""
+        )
+        pamIntegration.target = self
+        menu.addItem(pamIntegration)
+
+        let pamStatus = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+        pamStatus.isEnabled = false
+        pamStatus.isHidden = true
+        menu.addItem(pamStatus)
+        menu.addItem(.separator())
+
         let quit = NSMenuItem(title: "Quit Who Sudo'd", action: #selector(quit), keyEquivalent: "q")
         quit.target = self
         menu.addItem(quit)
 
         item.menu = menu
+        menu.delegate = self
         statusItem = item
         accessMenuItem = access
+        pamIntegrationMenuItem = pamIntegration
+        pamIntegrationStatusMenuItem = pamStatus
     }
 
     private func updateStatus(_ status: AuthorizationMonitorStatus) {
@@ -321,6 +359,137 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if status.accessibilityTrusted {
             PermisoAssistant.shared.dismiss()
         }
+    }
+
+    func menuWillOpen(_ menu: NSMenu) {
+        guard menu === statusItem?.menu else {
+            return
+        }
+        pamIntegration.refresh()
+    }
+
+    private func startPAMConversationServer() {
+        let server = PAMConversationServer(
+            requestHandler: { [weak self] request, lease in
+                guard let self, let monitor = self.monitor else {
+                    return false
+                }
+                return await monitor.offerPAMPasswordRequest(
+                    request,
+                    lease: lease,
+                    passwordHandler: { [weak self] password in
+                        self?.pamConversationServer?.submit(
+                            password: password,
+                            for: request.identifier
+                        )
+                    },
+                    useTerminalHandler: { [weak self] in
+                        self?.pamConversationServer?.useTerminal(
+                            for: request.identifier
+                        )
+                    }
+                )
+            },
+            endHandler: { [weak self] requestIdentifier in
+                self?.monitor?.endPAMPasswordRequest(requestIdentifier)
+            }
+        )
+        pamConversationServer = server
+        do {
+            try server.start()
+            pamConversationError = nil
+        } catch {
+            pamConversationServer = nil
+            pamConversationError = error.localizedDescription
+            logger.error("PAM conversation server failed: \(error.localizedDescription, privacy: .public)")
+        }
+        updatePAMIntegrationMenu(pamIntegration.snapshot)
+    }
+
+    private func updatePAMIntegrationMenu(_ snapshot: PAMIntegrationSnapshot) {
+        guard let actionItem = pamIntegrationMenuItem,
+              let statusItem = pamIntegrationStatusMenuItem else {
+            return
+        }
+
+        if let pamConversationError {
+            switch snapshot.integration.state {
+            case .installed, .needsRepair:
+                actionItem.title = "Uninstall PAM Password Input…"
+                actionItem.isEnabled = true
+                pamMenuAction = .uninstall
+            case .notInstalled, .unsupported:
+                actionItem.title = "PAM Password Input Unavailable"
+                actionItem.isEnabled = false
+                pamMenuAction = .none
+            }
+            statusItem.title = [pamConversationError, snapshot.integration.detail]
+                .compactMap { $0 }
+                .joined(separator: " ")
+            statusItem.isHidden = false
+            return
+        }
+
+        actionItem.isEnabled = true
+        switch snapshot.integration.state {
+        case .notInstalled:
+            pamMenuAction = .install
+            actionItem.title = snapshot.service == .requiresApproval
+                ? "Enable PAM Password Input Installer…"
+                : "Install PAM Password Input…"
+        case .installed:
+            pamMenuAction = .uninstall
+            actionItem.title = "Uninstall PAM Password Input…"
+        case .needsRepair:
+            pamMenuAction = .repair
+            actionItem.title = "Repair PAM Password Input…"
+        case .unsupported:
+            pamMenuAction = .none
+            actionItem.title = "PAM Password Input Unavailable"
+            actionItem.isEnabled = false
+        }
+
+        let detail = snapshot.operationError ?? snapshot.integration.detail
+        statusItem.title = detail ?? ""
+        statusItem.isHidden = detail == nil
+    }
+
+    @objc
+    private func togglePAMIntegration() {
+        guard confirmPAMAction(pamMenuAction) else {
+            return
+        }
+        switch pamMenuAction {
+        case .uninstall:
+            pamIntegration.uninstall()
+        case .install, .repair:
+            pamIntegration.install()
+        case .none:
+            break
+        }
+    }
+
+    private func confirmPAMAction(_ action: PAMMenuAction) -> Bool {
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        switch action {
+        case .install:
+            alert.messageText = "Install PAM Password Input?"
+            alert.informativeText = "This adds two signed components and two entries to the sudo PAM configuration. Terminal password input will continue to work. A restart is not required."
+            alert.addButton(withTitle: "Install")
+        case .repair:
+            alert.messageText = "Repair PAM Password Input?"
+            alert.informativeText = "This replaces the Who Sudo'd PAM components and restores its two sudo PAM entries. Other PAM entries stay in their current order."
+            alert.addButton(withTitle: "Repair")
+        case .uninstall:
+            alert.messageText = "Uninstall PAM Password Input?"
+            alert.informativeText = "This removes only the two Who Sudo'd sudo PAM entries and its installed components. Other PAM entries stay unchanged."
+            alert.addButton(withTitle: "Uninstall")
+        case .none:
+            return false
+        }
+        alert.addButton(withTitle: "Cancel")
+        return alert.runModal() == .alertFirstButtonReturn
     }
 
     @objc

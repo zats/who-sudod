@@ -2,6 +2,7 @@ name: WhoSudod
 
 options:
   bundleIdPrefix: com.zats
+  minimumXcodeGenVersion: "2.45.4"
   deploymentTarget:
     macOS: "26.0"
   xcodeVersion: "27.0"
@@ -13,6 +14,8 @@ packages:
 
 settings:
   base:
+    ARCHS: arm64
+    ONLY_ACTIVE_ARCH: NO
     SWIFT_VERSION: "6.0"
     DEVELOPMENT_TEAM: 5KE88HWMKJ
     CODE_SIGN_STYLE: Automatic
@@ -28,6 +31,11 @@ targets:
     productName: "Who Sudo'd"
     sources:
       - path: WhoSudod
+      - path: WhoSudodPAMInstaller/com.zats.WhoSudo.PAMInstaller.plist
+        buildPhase:
+          copyFiles:
+            destination: wrapper
+            subpath: Contents/Library/LaunchDaemons
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.zats.WhoSudo
@@ -40,6 +48,27 @@ targets:
         GENERATE_INFOPLIST_FILE: YES
     dependencies:
       - package: Permiso
+      - target: WhoSudodPAMInstaller
+        embed: true
+        link: false
+        codeSign: true
+        copy:
+          destination: wrapper
+          subpath: Contents/Library/LaunchServices
+      - target: WhoSudodPAM
+        embed: true
+        link: false
+        codeSign: true
+        copy:
+          destination: wrapper
+          subpath: Contents/Library/PAMModules
+      - target: WhoSudodPAMTerminalReader
+        embed: true
+        link: false
+        codeSign: true
+        copy:
+          destination: wrapper
+          subpath: Contents/Library/PAMModules
     scheme:
       testTargets:
         - WhoSudodTests
@@ -69,3 +98,69 @@ targets:
         GENERATE_INFOPLIST_FILE: YES
         INFOPLIST_KEY_CFBundleDisplayName: WhoSudodLiveRequester
         INFOPLIST_KEY_LSUIElement: NO
+
+  WhoSudodPAMInstaller:
+    type: tool
+    platform: macOS
+    productName: WhoSudodPAMInstaller
+    sources:
+      - path: WhoSudodPAMInstaller
+        excludes:
+          - "*.plist"
+      - path: WhoSudod/PAMIntegrationProtocol.swift
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.zats.WhoSudo.PAMInstaller
+        PRODUCT_NAME: WhoSudodPAMInstaller
+        GENERATE_INFOPLIST_FILE: YES
+        CREATE_INFOPLIST_SECTION_IN_BINARY: YES
+        CODE_SIGN_INJECT_BASE_ENTITLEMENTS: NO
+
+  WhoSudodPAM:
+    type: library.dynamic
+    platform: macOS
+    productName: pam_whosudod
+    sources:
+      - path: WhoSudodPAM
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.zats.WhoSudo.PAM
+        PRODUCT_NAME: pam_whosudod
+        GENERATE_INFOPLIST_FILE: NO
+        OTHER_CODE_SIGN_FLAGS: "--identifier com.zats.WhoSudo.PAM"
+        EXECUTABLE_PREFIX: ""
+        EXECUTABLE_EXTENSION: so
+        MACH_O_TYPE: mh_bundle
+        DYLIB_COMPATIBILITY_VERSION: ""
+        DYLIB_CURRENT_VERSION: ""
+        SKIP_INSTALL: YES
+        CODE_SIGN_INJECT_BASE_ENTITLEMENTS: NO
+        GCC_TREAT_WARNINGS_AS_ERRORS: YES
+        WARNING_CFLAGS:
+          - "-Wall"
+          - "-Wextra"
+    dependencies:
+      - sdk: libpam.tbd
+      - sdk: Security.framework
+      - sdk: CoreFoundation.framework
+
+  WhoSudodPAMTerminalReader:
+    type: tool
+    platform: macOS
+    productName: whosudod-pam-terminal-reader
+    sources:
+      - path: WhoSudodPAMTerminalReader
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.zats.WhoSudo.PAMTerminalReader
+        PRODUCT_NAME: whosudod-pam-terminal-reader
+        GENERATE_INFOPLIST_FILE: YES
+        CREATE_INFOPLIST_SECTION_IN_BINARY: YES
+        CODE_SIGN_INJECT_BASE_ENTITLEMENTS: NO
+        OTHER_CODE_SIGN_FLAGS: "--identifier com.zats.WhoSudo.PAMTerminalReader"
+        HEADER_SEARCH_PATHS:
+          - "$(SRCROOT)/WhoSudodPAM"
+        GCC_TREAT_WARNINGS_AS_ERRORS: YES
+        WARNING_CFLAGS:
+          - "-Wall"
+          - "-Wextra"

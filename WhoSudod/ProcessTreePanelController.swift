@@ -12,6 +12,16 @@ enum ProcessTableAnimationPolicy {
     }
 }
 
+/// Identifies a password conversation that the installed Who Sudo'd PAM module
+/// verified as live. Heuristic sudo detection must never create this value.
+struct VerifiedPAMPasswordRequest: Equatable, Sendable {
+    let id: UUID
+
+    init(id: UUID) {
+        self.id = id
+    }
+}
+
 enum ProcessPanelPlacement {
     case authentication(frame: CGRect, visibleFrame: CGRect)
     case standalone(anchorFrame: CGRect, visibleFrame: CGRect)
@@ -75,6 +85,9 @@ final class ProcessTreePanelController: NSWindowController {
     private var activeGeometryTransitionGeneration: Int?
     private var activeGeometryTransitionTarget: SidecarGeometry?
     private var currentPromptSequence = 0
+    private var activePAMPasswordRequestID: UUID?
+    private var passwordSubmissionHandler: (@MainActor (UUID, String) -> Void)?
+    private var useTerminalHandler: (@MainActor (UUID) -> Void)?
     private(set) var isPresented = false
 #if DEBUG
     private let logger = Logger(subsystem: "com.zats.WhoSudo", category: "LiveTreeDiagnostics")
@@ -97,6 +110,12 @@ final class ProcessTreePanelController: NSWindowController {
             defer: false
         )
         super.init(window: panel)
+        content.onPasswordSubmit = { [weak self] password in
+            self?.submitPassword(password)
+        }
+        content.onUseTerminal = { [weak self] in
+            self?.useTerminal()
+        }
         configure(panel)
         panel.contentView = content
     }
@@ -139,6 +158,39 @@ final class ProcessTreePanelController: NSWindowController {
                 visibleFrame: visibleFrame
             )
         )
+    }
+
+    /// Enables password input only for a request authenticated by the PAM IPC
+    /// layer. This does not take keyboard focus from the calling terminal.
+    func presentVerifiedPAMPasswordRequest(
+        _ request: VerifiedPAMPasswordRequest,
+        onPassword: @escaping @MainActor (UUID, String) -> Void,
+        onUseTerminal: @escaping @MainActor (UUID) -> Void
+    ) {
+        let replacesRequest = activePAMPasswordRequestID != request.id
+        activePAMPasswordRequestID = request.id
+        passwordSubmissionHandler = onPassword
+        useTerminalHandler = onUseTerminal
+
+        content.presentPasswordEntry(clearExistingInput: replacesRequest)
+        if let panel = window as? PassivePanel {
+            panel.acceptsKeyInput = true
+        }
+    }
+
+    func dismissVerifiedPAMPasswordRequest(_ requestID: UUID) {
+        guard activePAMPasswordRequestID == requestID else {
+            return
+        }
+        endPAMPasswordPresentation()
+    }
+
+    var isPresentingVerifiedPAMPasswordRequest: Bool {
+        activePAMPasswordRequestID != nil
+    }
+
+    var isPAMPasswordEntryFocused: Bool {
+        activePAMPasswordRequestID != nil && window?.isKeyWindow == true
     }
 
     private func show(
@@ -188,6 +240,7 @@ final class ProcessTreePanelController: NSWindowController {
 
     func hide(promptPresent: Bool, accessibilityTrusted: Bool) {
         cancelGeometryTransition()
+        endPAMPasswordPresentation()
         if isPresented {
             window?.orderOut(nil)
             isPresented = false
@@ -257,7 +310,44 @@ final class ProcessTreePanelController: NSWindowController {
         panel.ignoresMouseEvents = false
         panel.animationBehavior = .none
         panel.collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle, .fullScreenAuxiliary]
+        panel.becomesKeyOnlyIfNeeded = true
         panel.setAccessibilityIdentifier("who-sudod.process-tree.panel")
+    }
+
+    private func submitPassword(_ password: String) {
+        guard let requestID = activePAMPasswordRequestID,
+              let handler = passwordSubmissionHandler,
+              !password.isEmpty,
+              !password.contains("\0"),
+              password.lengthOfBytes(using: .utf8)
+                  <= PAMConversationWire.maximumPasswordLength else {
+            NSSound.beep()
+            return
+        }
+        endPAMPasswordPresentation()
+        handler(requestID, password)
+    }
+
+    private func useTerminal() {
+        guard let requestID = activePAMPasswordRequestID,
+              let handler = useTerminalHandler else {
+            return
+        }
+        endPAMPasswordPresentation()
+        handler(requestID)
+    }
+
+    private func endPAMPasswordPresentation() {
+        guard activePAMPasswordRequestID != nil else {
+            return
+        }
+        content.dismissPasswordEntry()
+        activePAMPasswordRequestID = nil
+        passwordSubmissionHandler = nil
+        useTerminalHandler = nil
+        if let panel = window as? PassivePanel {
+            panel.acceptsKeyInput = false
+        }
     }
 
     private func applyPanelGeometry(_ sidecar: SidecarGeometry) {
@@ -452,21 +542,37 @@ final class ProcessTreePanelController: NSWindowController {
 }
 
 private final class PassivePanel: NSPanel {
-    override var canBecomeKey: Bool { false }
+    var acceptsKeyInput = false {
+        didSet {
+            guard !acceptsKeyInput, isKeyWindow else {
+                return
+            }
+            makeFirstResponder(nil)
+            resignKey()
+        }
+    }
+
+    override var canBecomeKey: Bool { acceptsKeyInput }
     override var canBecomeMain: Bool { false }
 }
 
 @MainActor
 final class CompanionContentView: NSView {
+    var onPasswordSubmit: ((String) -> Void)?
+    var onUseTerminal: (() -> Void)?
+
     private let processTable: ProcessTableView
     private let material = NSVisualEffectView()
     private let tint = PanelTintView()
     private let body = HoverTrackingView()
     private let modeControl = ProcessModeToggleControl()
+    private let passwordEntry = PAMPasswordEntryView()
     private var materialSideConstraints: [NSLayoutConstraint] = []
     private var bodySideConstraints: [NSLayoutConstraint] = []
     private var tableSideConstraints: [NSLayoutConstraint] = []
     private var modeControlSideConstraints: [NSLayoutConstraint] = []
+    private var tableBottomConstraint: NSLayoutConstraint?
+    private var tablePasswordBottomConstraint: NSLayoutConstraint?
     private var attachmentSide: SidecarSide?
     private var reservedDialogWidth: CGFloat = 0
 
@@ -499,6 +605,28 @@ final class CompanionContentView: NSView {
     func setDisplayMode(_ mode: ProcessDisplayMode) {
         processTable.setDisplayMode(mode)
         modeControl.setDisplayMode(mode)
+    }
+
+    func presentPasswordEntry(clearExistingInput: Bool) {
+        if clearExistingInput {
+            passwordEntry.clearPassword()
+        }
+        guard passwordEntry.isHidden else {
+            return
+        }
+        tableBottomConstraint?.isActive = false
+        tablePasswordBottomConstraint?.isActive = true
+        passwordEntry.isHidden = false
+    }
+
+    func dismissPasswordEntry() {
+        passwordEntry.clearPassword()
+        guard !passwordEntry.isHidden else {
+            return
+        }
+        passwordEntry.isHidden = true
+        tablePasswordBottomConstraint?.isActive = false
+        tableBottomConstraint?.isActive = true
     }
 
     var renderedTable: RenderedProcessTable {
@@ -613,6 +741,25 @@ final class CompanionContentView: NSView {
 
         modeControl.translatesAutoresizingMaskIntoConstraints = false
         body.addSubview(modeControl)
+        passwordEntry.translatesAutoresizingMaskIntoConstraints = false
+        passwordEntry.isHidden = true
+        passwordEntry.onSubmit = { [weak self] password in
+            self?.onPasswordSubmit?(password)
+        }
+        passwordEntry.onUseTerminal = { [weak self] in
+            self?.onUseTerminal?()
+        }
+        body.addSubview(passwordEntry)
+
+        let tableBottomConstraint = processTable.bottomAnchor.constraint(
+            equalTo: body.bottomAnchor
+        )
+        let tablePasswordBottomConstraint = processTable.bottomAnchor.constraint(
+            equalTo: passwordEntry.topAnchor,
+            constant: -8
+        )
+        self.tableBottomConstraint = tableBottomConstraint
+        self.tablePasswordBottomConstraint = tablePasswordBottomConstraint
         NSLayoutConstraint.activate([
             material.topAnchor.constraint(equalTo: topAnchor),
             material.bottomAnchor.constraint(equalTo: bottomAnchor),
@@ -626,7 +773,15 @@ final class CompanionContentView: NSView {
             body.bottomAnchor.constraint(equalTo: material.bottomAnchor),
 
             processTable.topAnchor.constraint(equalTo: body.topAnchor),
-            processTable.bottomAnchor.constraint(equalTo: body.bottomAnchor),
+            tableBottomConstraint,
+
+            passwordEntry.leadingAnchor.constraint(equalTo: processTable.leadingAnchor),
+            passwordEntry.trailingAnchor.constraint(equalTo: processTable.trailingAnchor),
+            passwordEntry.bottomAnchor.constraint(
+                equalTo: body.bottomAnchor,
+                constant: -ProcessPanelMetrics.tableHorizontalInset
+            ),
+            passwordEntry.heightAnchor.constraint(equalToConstant: 86),
 
             modeControl.centerYAnchor.constraint(equalTo: body.centerYAnchor),
             modeControl.widthAnchor.constraint(
@@ -649,6 +804,127 @@ final class CompanionContentView: NSView {
         effectiveAppearance.performAsCurrentDrawingAppearance { [material] in
             material.layer?.borderColor = NSColor.separatorColor
                 .withAlphaComponent(0.28)
+                .cgColor
+        }
+    }
+}
+
+@MainActor
+final class PAMPasswordEntryView: NSVisualEffectView {
+    var onSubmit: ((String) -> Void)?
+    var onUseTerminal: (() -> Void)?
+
+    private let passwordField = NSSecureTextField()
+    private let submitButton = NSButton()
+    private let useTerminalButton = NSButton()
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        configure()
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    func clearPassword() {
+        currentPasswordEditor?.string = ""
+        passwordField.abortEditing()
+        passwordField.stringValue = ""
+    }
+
+    private var currentPasswordEditor: NSText? {
+        passwordField.currentEditor()
+    }
+
+    private func configure() {
+        material = .popover
+        blendingMode = .withinWindow
+        state = .active
+        wantsLayer = true
+        layer?.cornerRadius = 11
+        layer?.cornerCurve = .continuous
+        layer?.masksToBounds = true
+        layer?.borderWidth = 0.5
+        setAccessibilityIdentifier("who-sudod.pam-password-entry")
+
+        passwordField.translatesAutoresizingMaskIntoConstraints = false
+        passwordField.placeholderString = "Password"
+        passwordField.usesSingleLineMode = true
+        passwordField.target = self
+        passwordField.action = #selector(submitPassword)
+        passwordField.setAccessibilityIdentifier("who-sudod.pam-password-field")
+        addSubview(passwordField)
+
+        submitButton.translatesAutoresizingMaskIntoConstraints = false
+        submitButton.title = "Submit"
+        submitButton.bezelStyle = .rounded
+        submitButton.keyEquivalent = "\r"
+        submitButton.target = self
+        submitButton.action = #selector(submitPassword)
+        submitButton.setAccessibilityIdentifier("who-sudod.pam-password-submit")
+        addSubview(submitButton)
+
+        useTerminalButton.translatesAutoresizingMaskIntoConstraints = false
+        useTerminalButton.title = "Use Terminal"
+        useTerminalButton.bezelStyle = .rounded
+        useTerminalButton.target = self
+        useTerminalButton.action = #selector(useTerminal)
+        useTerminalButton.setAccessibilityIdentifier("who-sudod.pam-use-terminal")
+        addSubview(useTerminalButton)
+
+        let submitMinimumWidth = submitButton.widthAnchor.constraint(
+            greaterThanOrEqualToConstant: 66
+        )
+        submitMinimumWidth.priority = .defaultHigh
+        NSLayoutConstraint.activate([
+            passwordField.topAnchor.constraint(equalTo: topAnchor, constant: 9),
+            passwordField.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 9),
+            passwordField.heightAnchor.constraint(equalToConstant: 28),
+
+            submitButton.leadingAnchor.constraint(
+                equalTo: passwordField.trailingAnchor,
+                constant: 8
+            ),
+            submitButton.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -9),
+            submitButton.centerYAnchor.constraint(equalTo: passwordField.centerYAnchor),
+            submitMinimumWidth,
+
+            useTerminalButton.topAnchor.constraint(
+                equalTo: passwordField.bottomAnchor,
+                constant: 7
+            ),
+            useTerminalButton.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 9),
+            useTerminalButton.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -9),
+            useTerminalButton.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -9)
+        ])
+        updateAppearanceColors()
+    }
+
+    @objc
+    private func submitPassword() {
+        passwordField.validateEditing()
+        let password = passwordField.stringValue
+        clearPassword()
+        onSubmit?(password)
+    }
+
+    @objc
+    private func useTerminal() {
+        clearPassword()
+        onUseTerminal?()
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        updateAppearanceColors()
+    }
+
+    private func updateAppearanceColors() {
+        effectiveAppearance.performAsCurrentDrawingAppearance { [layer] in
+            layer?.borderColor = NSColor.separatorColor
+                .withAlphaComponent(0.35)
                 .cgColor
         }
     }

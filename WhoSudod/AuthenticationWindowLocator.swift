@@ -91,6 +91,12 @@ enum TerminalPromptWindowLocator {
         return updated
     }
 
+    static func existingWindow(
+        for window: TerminalPromptWindowSnapshot
+    ) -> TerminalPromptWindowSnapshot? {
+        currentSnapshot(for: window)
+    }
+
     private static func currentSnapshot(
         for window: TerminalPromptWindowSnapshot
     ) -> TerminalPromptWindowSnapshot? {

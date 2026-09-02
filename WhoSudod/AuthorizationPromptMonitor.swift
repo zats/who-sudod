@@ -180,6 +180,15 @@ final class AuthorizationPromptMonitor: NSObject {
     private let ignoredApplications: IgnoredApplicationsStore
     private let panel: ProcessTreePanelController
     private let statusHandler: (AuthorizationMonitorStatus) -> Void
+    private struct ActivePAMPasswordRequest {
+        let request: PAMPasswordRequest
+        let lease: PAMConversationLease
+        let snapshot: AuthenticationProcessSnapshot
+        var terminalWindow: TerminalPromptWindowSnapshot
+        var offersAppInput: Bool
+        let passwordHandler: @MainActor (Data) -> Void
+        let useTerminalHandler: @MainActor () -> Void
+    }
     private lazy var eventMonitor = AuthenticationEventMonitor { [weak self] event in
         self?.recordAuthenticationEvent(event)
     }
@@ -206,6 +215,8 @@ final class AuthorizationPromptMonitor: NSObject {
     private var fastCoreGraphicsDiscoveryUntil: TimeInterval = 0
     private var frontmostApplicationProcessID: pid_t?
     private var isCurrentSystemPromptIgnored = false
+    private var activePAMPasswordRequest: ActivePAMPasswordRequest?
+    private var pendingPAMPasswordRequestIdentifier: PAMRequestIdentifier?
 
     init(
         displayMode: ProcessDisplayMode = .simple,
@@ -224,6 +235,129 @@ final class AuthorizationPromptMonitor: NSObject {
 
     func setDisplayMode(_ mode: ProcessDisplayMode) {
         panel.setDisplayMode(mode)
+    }
+
+    func offerPAMPasswordRequest(
+        _ request: PAMPasswordRequest,
+        lease: PAMConversationLease,
+        passwordHandler: @escaping @MainActor (Data) -> Void,
+        useTerminalHandler: @escaping @MainActor () -> Void
+    ) async -> Bool {
+        guard lease.isActive,
+              AccessibilityFocusReader.isTrusted,
+              target == nil,
+              PAMPromptPolicy.isAccountPasswordPrompt(request.prompt) else {
+            return false
+        }
+        if let active = activePAMPasswordRequest {
+            return active.request.identifier == request.identifier
+                && active.offersAppInput
+        }
+        guard pendingPAMPasswordRequestIdentifier == nil else {
+            return false
+        }
+        pendingPAMPasswordRequestIdentifier = request.identifier
+        defer {
+            if pendingPAMPasswordRequestIdentifier == request.identifier {
+                pendingPAMPasswordRequestIdentifier = nil
+            }
+        }
+
+        let observed = await scanner.pamSudoSnapshot(
+            processID: request.processID,
+            realUserID: request.realUserID
+        )
+        guard pendingPAMPasswordRequestIdentifier == request.identifier,
+              lease.isActive,
+              target == nil,
+              activePAMPasswordRequest == nil,
+              let unfilteredChain = observed.candidates.first,
+              unfilteredChain.requesterProcess.pid == request.processID else {
+            return false
+        }
+        let filtered = IgnoredApplicationsPolicy.filtering(
+            observed,
+            by: ignoredApplications.rules
+        )
+        guard pendingPAMPasswordRequestIdentifier == request.identifier,
+              lease.isActive,
+              activePAMPasswordRequest == nil,
+              let chain = filtered.candidates.first,
+              let terminalWindow = TerminalPromptWindowLocator.focusedWindow(for: chain) else {
+            return false
+        }
+
+        guard pendingPAMPasswordRequestIdentifier == request.identifier,
+              lease.isActive,
+              activePAMPasswordRequest == nil else {
+            return false
+        }
+
+        cancelProcessScan()
+        cancelTerminalPromptScan()
+        terminalPromptStability.recordConfirmation()
+        terminalPromptIdentity = chain.requesterProcess.identity
+        self.terminalPromptWindow = terminalWindow
+        promptSequence = nextTerminalPromptSequence
+        nextTerminalPromptSequence -= 1
+        lastProcessSnapshot = AuthenticationProcessSnapshot(
+            candidates: [chain],
+            inspectionState: filtered.inspectionState
+        )
+        activePAMPasswordRequest = ActivePAMPasswordRequest(
+            request: request,
+            lease: lease,
+            snapshot: lastProcessSnapshot,
+            terminalWindow: terminalWindow,
+            offersAppInput: true,
+            passwordHandler: passwordHandler,
+            useTerminalHandler: useTerminalHandler
+        )
+        panel.presentVerifiedPAMPasswordRequest(
+            VerifiedPAMPasswordRequest(id: request.identifier.uuid),
+            onPassword: { [weak self] requestID, password in
+                self?.submitPAMPassword(requestID: requestID, password: password)
+            },
+            onUseTerminal: { [weak self] requestID in
+                self?.useTerminalForPAMRequest(requestID: requestID)
+            }
+        )
+        panel.showStandalone(
+            snapshot: lastProcessSnapshot,
+            promptSequence: promptSequence,
+            anchorFrame: terminalWindow.frame,
+            visibleFrame: terminalWindow.visibleFrame
+        )
+        guard lease.isActive,
+              activePAMPasswordRequest?.request.identifier == request.identifier else {
+            panel.dismissVerifiedPAMPasswordRequest(request.identifier.uuid)
+            if activePAMPasswordRequest?.request.identifier == request.identifier {
+                activePAMPasswordRequest = nil
+            }
+            resetTerminalPrompt(hidePanel: true, promptPresent: false)
+            return false
+        }
+        report(isShowingPanel: true)
+        logger.notice(
+            "Verified PAM password request received for PID \(request.processID, privacy: .public)"
+        )
+        return true
+    }
+
+    func endPAMPasswordRequest(_ requestIdentifier: PAMRequestIdentifier) {
+        if pendingPAMPasswordRequestIdentifier == requestIdentifier {
+            pendingPAMPasswordRequestIdentifier = nil
+        }
+        guard let active = activePAMPasswordRequest,
+              active.request.identifier == requestIdentifier else {
+            return
+        }
+        panel.dismissVerifiedPAMPasswordRequest(requestIdentifier.uuid)
+        activePAMPasswordRequest = nil
+        logger.notice(
+            "Verified PAM password request ended for PID \(active.request.processID, privacy: .public)"
+        )
+        resetTerminalPrompt(hidePanel: true, promptPresent: false)
     }
 
     func start() {
@@ -274,6 +408,8 @@ final class AuthorizationPromptMonitor: NSObject {
         timer = nil
         cancelProcessScan()
         cancelTerminalPromptScan()
+        pendingPAMPasswordRequestIdentifier = nil
+        abandonActivePAMPasswordRequest()
         resetTerminalPrompt(hidePanel: false, promptPresent: false)
         promptSessions.removeAll()
         eventMonitor.stop()
@@ -324,6 +460,7 @@ final class AuthorizationPromptMonitor: NSObject {
             eventMonitor.stop()
             cancelProcessScan()
             cancelTerminalPromptScan()
+            abandonActivePAMPasswordRequest()
             target = nil
             terminalPromptIdentity = nil
             terminalPromptWindow = nil
@@ -440,6 +577,21 @@ final class AuthorizationPromptMonitor: NSObject {
             target = current
             promptSessions.touch(window: current, at: Date())
             updatePanel(for: current, now: now)
+            return
+        }
+
+        if let active = activePAMPasswordRequest {
+            if let candidate = frontmostCandidate {
+                abandonActivePAMPasswordRequest()
+                resetTerminalPrompt(hidePanel: false, promptPresent: true)
+                activatePrompt(candidate, at: Date())
+                logger.notice(
+                    "Authentication window replaced PAM password input for PID \(candidate.processID, privacy: .public)"
+                )
+                updatePanel(for: candidate, now: now)
+                return
+            }
+            updatePAMPasswordRequest(active)
             return
         }
 
@@ -672,6 +824,7 @@ final class AuthorizationPromptMonitor: NSObject {
 
     private func startTerminalPromptScanIfNeeded(now: TimeInterval) {
         guard target == nil,
+              activePAMPasswordRequest == nil,
               terminalPromptScanTask == nil,
               now >= nextTerminalPromptScanTime else {
             return
@@ -907,6 +1060,84 @@ final class AuthorizationPromptMonitor: NSObject {
             )
             report(isShowingPanel: false)
         }
+    }
+
+    private func updatePAMPasswordRequest(_ active: ActivePAMPasswordRequest) {
+        guard active.lease.isActive,
+              let chain = active.snapshot.candidates.first else {
+            abandonActivePAMPasswordRequest()
+            resetTerminalPrompt(hidePanel: true, promptPresent: false)
+            return
+        }
+        var updatedWindow = TerminalPromptWindowLocator.focusedWindow(
+            for: chain,
+            preserving: active.terminalWindow
+        )
+        if updatedWindow == nil, panel.isPAMPasswordEntryFocused {
+            updatedWindow = TerminalPromptWindowLocator.existingWindow(
+                for: active.terminalWindow
+            )
+        }
+        guard let updatedWindow else {
+            if active.offersAppInput {
+                active.useTerminalHandler()
+                panel.dismissVerifiedPAMPasswordRequest(active.request.identifier.uuid)
+                var terminalOnly = active
+                terminalOnly.offersAppInput = false
+                activePAMPasswordRequest = terminalOnly
+            }
+            hideTerminalPromptPanel()
+            return
+        }
+
+        var updated = active
+        updated.terminalWindow = updatedWindow
+        activePAMPasswordRequest = updated
+        terminalPromptWindow = updatedWindow
+        panel.showStandalone(
+            snapshot: active.snapshot,
+            promptSequence: promptSequence,
+            anchorFrame: updatedWindow.frame,
+            visibleFrame: updatedWindow.visibleFrame
+        )
+        report(isShowingPanel: true)
+    }
+
+    private func submitPAMPassword(requestID: UUID, password: String) {
+        guard var active = activePAMPasswordRequest,
+              active.request.identifier.uuid == requestID,
+              active.lease.isActive,
+              active.offersAppInput,
+              let passwordData = password.data(using: .utf8),
+              !passwordData.isEmpty,
+              passwordData.count <= PAMConversationWire.maximumPasswordLength else {
+            return
+        }
+        active.offersAppInput = false
+        activePAMPasswordRequest = active
+        active.passwordHandler(passwordData)
+    }
+
+    private func useTerminalForPAMRequest(requestID: UUID) {
+        guard var active = activePAMPasswordRequest,
+              active.request.identifier.uuid == requestID,
+              active.offersAppInput else {
+            return
+        }
+        active.offersAppInput = false
+        activePAMPasswordRequest = active
+        active.useTerminalHandler()
+    }
+
+    private func abandonActivePAMPasswordRequest() {
+        guard let active = activePAMPasswordRequest else {
+            return
+        }
+        if active.offersAppInput {
+            active.useTerminalHandler()
+        }
+        panel.dismissVerifiedPAMPasswordRequest(active.request.identifier.uuid)
+        activePAMPasswordRequest = nil
     }
 
     private func report(isShowingPanel: Bool) {

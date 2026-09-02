@@ -1,0 +1,127 @@
+import Foundation
+
+final class PAMInstallerLifecycle: @unchecked Sendable {
+    private let lock = NSLock()
+    private var connections: [ObjectIdentifier: NSXPCConnection] = [:]
+    private var activeOperations = 0
+    private var exitGeneration: UInt64 = 0
+
+    init() {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
+            self?.exitIfStillIdle(generation: 0)
+        }
+    }
+
+    func add(_ connection: NSXPCConnection) {
+        lock.withLock {
+            exitGeneration &+= 1
+            connections[ObjectIdentifier(connection)] = connection
+        }
+    }
+
+    func remove(_ connection: NSXPCConnection) {
+        lock.withLock {
+            connections.removeValue(forKey: ObjectIdentifier(connection))
+            scheduleExitIfIdle()
+        }
+    }
+
+    func beginOperation() {
+        lock.withLock {
+            exitGeneration &+= 1
+            activeOperations += 1
+        }
+    }
+
+    func endOperation() {
+        lock.withLock {
+            activeOperations -= 1
+            scheduleExitIfIdle()
+        }
+    }
+
+    private func scheduleExitIfIdle() {
+        guard connections.isEmpty, activeOperations == 0 else {
+            return
+        }
+        exitGeneration &+= 1
+        let generation = exitGeneration
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
+            self?.exitIfStillIdle(generation: generation)
+        }
+    }
+
+    private func exitIfStillIdle(generation: UInt64) {
+        let shouldExit = lock.withLock {
+            exitGeneration == generation
+                && connections.isEmpty
+                && activeOperations == 0
+        }
+        if shouldExit {
+            exit(EXIT_SUCCESS)
+        }
+    }
+}
+
+final class PAMInstallerService: NSObject, PAMInstallerXPCProtocol {
+    private let files = PAMInstallerFileManager()
+    private let lock = NSLock()
+    private let lifecycle: PAMInstallerLifecycle
+
+    init(lifecycle: PAMInstallerLifecycle) {
+        self.lifecycle = lifecycle
+    }
+
+    func status(reply: @escaping (Int, String?) -> Void) {
+        perform({ files.inspect() }, reply: reply)
+    }
+
+    func install(reply: @escaping (Int, String?) -> Void) {
+        perform({ files.install() }, reply: reply)
+    }
+
+    func uninstall(reply: @escaping (Int, String?) -> Void) {
+        perform({ files.uninstall() }, reply: reply)
+    }
+
+    private func perform(
+        _ operation: () -> PAMIntegrationInspection,
+        reply: @escaping (Int, String?) -> Void
+    ) {
+        lifecycle.beginOperation()
+        let inspection = lock.withLock(operation)
+        reply(inspection.state.rawValue, inspection.detail)
+        lifecycle.endOperation()
+    }
+
+}
+
+final class PAMInstallerListenerDelegate: NSObject, NSXPCListenerDelegate {
+    private let lifecycle = PAMInstallerLifecycle()
+    private lazy var service = PAMInstallerService(lifecycle: lifecycle)
+
+    func listener(
+        _ listener: NSXPCListener,
+        shouldAcceptNewConnection connection: NSXPCConnection
+    ) -> Bool {
+        guard connection.processIdentifier > 0 else { return false }
+        lifecycle.add(connection)
+        let finish = { [weak lifecycle, weak connection] in
+            guard let connection else { return }
+            lifecycle?.remove(connection)
+        }
+        connection.interruptionHandler = finish
+        connection.invalidationHandler = finish
+        connection.exportedInterface = NSXPCInterface(with: PAMInstallerXPCProtocol.self)
+        connection.exportedObject = service
+        connection.activate()
+        return true
+    }
+}
+
+let delegate = PAMInstallerListenerDelegate()
+let listener = NSXPCListener(machServiceName: PAMIntegrationConstants.machServiceName)
+listener.setConnectionCodeSigningRequirement(PAMIntegrationConstants.applicationSigningRequirement)
+listener.delegate = delegate
+listener.activate()
+dispatchMain()

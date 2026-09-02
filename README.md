@@ -6,20 +6,26 @@ The requested command does not normally start until authentication succeeds. Who
 
 The 46-point envelope corner radius is the measured 26-point SecurityAgent dialog radius plus the 20-point inset. This keeps the inner and outer corner curves concentric.
 
-The app does not modify SecurityAgent, `sudo`, PAM, or system files. SIP can stay enabled. All process inspection stays on the Mac.
+The app does not modify SecurityAgent or `sudo`. Its optional PAM Password Input feature installs a signed PAM module, a signed terminal reader, and two owned lines around the standard password entry in `/etc/pam.d/sudo`. Install, repair, and uninstall are explicit menu actions. The installer keeps all other PAM entries and their order. It refuses a PAM configuration that it cannot update without changing password behavior. SIP can stay enabled. All process inspection and password transfer stay on the Mac.
 
 ## Run
 
-1. Open `WhoSudod.xcodeproj` and run the `WhoSudod` scheme, or build it from Terminal:
+1. Generate the ignored Xcode project from `project.yml`:
 
    ```sh
-   xcodegen generate
+   Tools/generate-project.zsh
+   ```
+
+2. Open `WhoSudod.xcodeproj` and run the `WhoSudod` scheme, or build and open the app from Terminal:
+
+   ```sh
    xcodebuild -project WhoSudod.xcodeproj -scheme WhoSudod -configuration Debug -derivedDataPath .build build
    open ".build/Build/Products/Debug/Who Sudo'd.app"
    ```
 
-2. The bundled Permiso assistant opens **System Settings > Privacy & Security > Device Control and Data Access** and shows how to add Who Sudo'd. This category is named **Accessibility** on older macOS versions. Until access is allowed, Who Sudo'd does not inspect processes or show the companion window. This access lets the app verify and follow the system authentication window. It does not let Who Sudo'd enter or read a password.
-3. Start an operation that needs authentication. Examples include `sudo -k /bin/echo who-sudod-check`, an Authorization Services request, or an app that uses LocalAuthentication.
+3. The bundled Permiso assistant opens **System Settings > Privacy & Security > Device Control and Data Access** and shows how to add Who Sudo'd. This category is named **Accessibility** on older macOS versions. Until access is allowed, Who Sudo'd does not inspect processes or show the companion window. Accessibility access lets the app verify and follow the system authentication window. It does not let the app read a password.
+4. To use the app as an optional password input for terminal `sudo`, select **Install PAM Password Input…** in the menu bar menu. The system can ask you to approve the signed installer service. A restart is not required.
+5. Start an operation that needs authentication. Examples include `sudo -k /bin/echo who-sudod-check`, an Authorization Services request, or an app that uses LocalAuthentication.
 
 Who Sudo'd runs as a menu bar app. Its key icon shows the current monitor state.
 
@@ -35,13 +41,18 @@ The app reads the pending invocation through Apple's `/bin/ps` because macOS blo
 
 macOS does not provide a general mapping from a terminal device to an app window or tab. The panel therefore does not claim exact tab attribution. If the user changes to another existing window in the same app, the panel hides instead of moving to that window.
 
-The app does not read authentication payloads, passwords, or text-field values. The unified-log record format is an observed macOS interface, not a documented stable API, so a future macOS release can require parser updates. macOS also does not supply a public transaction identifier that joins every visible dialog to one requester. The app uses the dialog type and a narrow time window for that join. A process can imitate a LocalAuthentication client log record, so the app describes log attribution as observed, not verified. Overlapping requests can remain ambiguous, and the `sudo` fallback is only a live-process heuristic.
+Without the optional PAM feature, the app does not read authentication payloads, passwords, or text-field values. When the feature is installed, a signed PAM module offers app input only after the PAM stack reaches the standard account-password prompt. A successful Touch ID, smart-card, YubiKey, or other earlier `sufficient` PAM method bypasses this path. The signed terminal reader supplies the normal hidden password input at the same time as the app. The first complete password wins, and **Use Terminal** removes only the app option. Who Sudo'd sends an app-entered password directly to the waiting PAM conversation and does not log or store it. Other prompt text and multi-prompt conversations use the original PAM conversation only.
+
+The optional input path does not run for `sudo -n`, `sudo -S`, or `sudo -A`. After the app accepts a request, the terminal reader uses a plain `Password:` prompt and a five-minute input limit. It cannot preserve a custom `sudo -p` prompt, `SUDO_PROMPT`, `pwfeedback`, a configured password timeout, or prompt bells. If the helper cannot start after the app route is ready, authentication stops with a conversation error instead of showing a second password prompt.
+
+The unified-log record format is an observed macOS interface, not a documented stable API, so a future macOS release can require parser updates. macOS also does not supply a public transaction identifier that joins every visible dialog to one requester. The app uses the dialog type and a narrow time window for that join. A process can imitate a LocalAuthentication client log record, so the app describes log attribution as observed, not verified. Overlapping requests can remain ambiguous, and the `sudo` fallback is only a live-process heuristic.
 
 ## Test
 
 ```sh
-xcodegen generate
+Tools/generate-project.zsh
 xcodebuild -project WhoSudod.xcodeproj -scheme WhoSudod -destination 'platform=macOS' -derivedDataPath .build test
+Tools/test-pam.zsh
 ```
 
 Run the deterministic password-only sudo check after Accessibility access is enabled:
