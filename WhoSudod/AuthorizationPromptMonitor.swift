@@ -30,6 +30,23 @@ struct WindowObservationStability: Equatable {
     }
 }
 
+enum AuthenticationWindowDiscoveryPolicy {
+    static let fallbackInterval: TimeInterval = 0.20
+
+    static func shouldInspectCoreGraphics(
+        forceDiscovery: Bool,
+        hasActiveSystemPrompt: Bool,
+        isInFastDiscoveryBurst: Bool,
+        now: TimeInterval,
+        nextFallbackTime: TimeInterval
+    ) -> Bool {
+        forceDiscovery
+            || hasActiveSystemPrompt
+            || isInFastDiscoveryBurst
+            || now >= nextFallbackTime
+    }
+}
+
 enum TerminalPromptObservationResolution: Equatable {
     case keepCurrent
     case waitForCurrent
@@ -184,6 +201,9 @@ final class AuthorizationPromptMonitor: NSObject {
     private var promptSequence = 0
     private var observationStability = WindowObservationStability()
     private var terminalPromptStability = WindowObservationStability()
+    private var lastReportedStatus: AuthorizationMonitorStatus?
+    private var fastCoreGraphicsDiscoveryUntil: TimeInterval = 0
+    private var frontmostApplicationProcessID: pid_t?
 
     init(
         displayMode: ProcessDisplayMode = .simple,
@@ -216,7 +236,28 @@ final class AuthorizationPromptMonitor: NSObject {
             name: NSWorkspace.didActivateApplicationNotification,
             object: nil
         )
+        NSWorkspace.shared.notificationCenter.addObserver(
+            self,
+            selector: #selector(runningApplicationsDidChange),
+            name: NSWorkspace.didLaunchApplicationNotification,
+            object: nil
+        )
+        NSWorkspace.shared.notificationCenter.addObserver(
+            self,
+            selector: #selector(runningApplicationsDidChange),
+            name: NSWorkspace.didTerminateApplicationNotification,
+            object: nil
+        )
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(screenParametersDidChange),
+            name: NSApplication.didChangeScreenParametersNotification,
+            object: nil
+        )
 
+        AuthenticationWindowLocator.invalidateDisplayCache()
+        frontmostApplicationProcessID = NSWorkspace.shared.frontmostApplication?
+            .processIdentifier
         let timer = Timer(timeInterval: 1.0 / 30.0, target: self, selector: #selector(tick), userInfo: nil, repeats: true)
         RunLoop.main.add(timer, forMode: .common)
         self.timer = timer
@@ -234,6 +275,7 @@ final class AuthorizationPromptMonitor: NSObject {
         eventMonitor.stop()
         DistributedNotificationCenter.default().removeObserver(self)
         NSWorkspace.shared.notificationCenter.removeObserver(self)
+        NotificationCenter.default.removeObserver(self)
         panel.hide(
             promptPresent: false,
             accessibilityTrusted: AccessibilityFocusReader.isTrusted
@@ -248,12 +290,29 @@ final class AuthorizationPromptMonitor: NSObject {
     @objc
     private func securityAgentDidShow(_ notification: Notification) {
         logger.notice("SecurityAgent UI notification received")
+        beginFastDiscoveryBurst()
         refresh(forceDiscovery: true)
     }
 
     @objc
-    private func frontmostApplicationDidChange() {
-        refresh(forceDiscovery: false)
+    private func frontmostApplicationDidChange(_ notification: Notification) {
+        frontmostApplicationProcessID = (
+            notification.userInfo?[NSWorkspace.applicationUserInfoKey]
+                as? NSRunningApplication
+        )?.processIdentifier
+            ?? NSWorkspace.shared.frontmostApplication?.processIdentifier
+        refresh(forceDiscovery: true)
+    }
+
+    @objc
+    private func runningApplicationsDidChange() {
+        refresh(forceDiscovery: true)
+    }
+
+    @objc
+    private func screenParametersDidChange() {
+        AuthenticationWindowLocator.invalidateDisplayCache()
+        refresh(forceDiscovery: true)
     }
 
     private func refresh(forceDiscovery: Bool) {
@@ -277,22 +336,42 @@ final class AuthorizationPromptMonitor: NSObject {
         eventMonitor.start()
 
         let now = ProcessInfo.processInfo.systemUptime
-        let observationDate = Date()
-        let visibleCoreGraphicsWindows = AuthenticationWindowLocator
-            .onScreenCoreGraphicsCandidates()
-        promptSessions.observeVisibleCoreGraphicsWindows(
-            visibleCoreGraphicsWindows,
-            at: observationDate
-        )
-        let visibleAccessibilityWindows = promptSessions.accessibilityWindowIdentities
-            .compactMap { AuthenticationWindowLocator.snapshot(identity: $0) }
-        promptSessions.observeVisibleAccessibilityWindows(
-            visibleAccessibilityWindows,
-            at: observationDate
-        )
-        let frontmostCandidate = AuthenticationWindowLocator.frontmostCandidate(
-            from: visibleCoreGraphicsWindows
-        )
+        let inspectsCoreGraphics = AuthenticationWindowDiscoveryPolicy
+            .shouldInspectCoreGraphics(
+                forceDiscovery: forceDiscovery,
+                hasActiveSystemPrompt: target != nil,
+                isInFastDiscoveryBurst: now < fastCoreGraphicsDiscoveryUntil,
+                now: now,
+                nextFallbackTime: nextDiscoveryTime
+            )
+        let frontmostCandidate: AuthenticationWindowSnapshot?
+        if inspectsCoreGraphics {
+            if target == nil {
+                nextDiscoveryTime = now + AuthenticationWindowDiscoveryPolicy.fallbackInterval
+            }
+            let observationDate = Date()
+            let visibleCoreGraphicsWindows = AuthenticationWindowLocator
+                .onScreenCoreGraphicsCandidates()
+            promptSessions.observeVisibleCoreGraphicsWindows(
+                visibleCoreGraphicsWindows,
+                at: observationDate
+            )
+            let visibleAccessibilityWindows = promptSessions.accessibilityWindowIdentities
+                .compactMap { AuthenticationWindowLocator.snapshot(identity: $0) }
+            promptSessions.observeVisibleAccessibilityWindows(
+                visibleAccessibilityWindows,
+                at: observationDate
+            )
+            frontmostCandidate = AuthenticationWindowLocator.frontmostCandidate(
+                from: visibleCoreGraphicsWindows,
+                frontmostProcessID: frontmostApplicationProcessID
+            )
+        } else {
+            frontmostCandidate = AuthenticationWindowLocator
+                .frontmostAccessibilityCandidate(
+                    processID: frontmostApplicationProcessID
+                )
+        }
 
         if let currentTarget = target {
             if let frontmostCandidate {
@@ -372,21 +451,19 @@ final class AuthorizationPromptMonitor: NSObject {
             return
         }
 
-        guard forceDiscovery || now >= nextDiscoveryTime else {
-            return
-        }
-        nextDiscoveryTime = now + 0.20
-
-        guard let candidate = frontmostCandidate else {
-            startTerminalPromptScanIfNeeded(now: now)
-            panel.recordReadiness(accessibilityTrusted: true)
-            report(isShowingPanel: false)
+        if let candidate = frontmostCandidate {
+            activatePrompt(candidate, at: Date())
+            logger.notice("Authentication window detected for PID \(candidate.processID, privacy: .public)")
+            updatePanel(for: candidate, now: now)
             return
         }
 
-        activatePrompt(candidate, at: Date())
-        logger.notice("Authentication window detected for PID \(candidate.processID, privacy: .public)")
-        updatePanel(for: candidate, now: now)
+        startTerminalPromptScanIfNeeded(now: now)
+        guard inspectsCoreGraphics else {
+            return
+        }
+        panel.recordReadiness(accessibilityTrusted: true)
+        report(isShowingPanel: false)
     }
 
     private func updatePanel(
@@ -439,7 +516,9 @@ final class AuthorizationPromptMonitor: NSObject {
     ) {
         let transition = AuthenticationWindowFocusTransition.resolve(
             from: window,
-            to: AuthenticationWindowLocator.frontmostCandidate()
+            to: AuthenticationWindowLocator.frontmostCandidate(
+                frontmostProcessID: frontmostApplicationProcessID
+            )
         )
         if allowsFocusRecovery,
            case let .samePrompt(candidate) = transition {
@@ -700,6 +779,16 @@ final class AuthorizationPromptMonitor: NSObject {
             recentEvents.removeFirst(recentEvents.count - 64)
         }
         nextProcessScanTime = 0
+        beginFastDiscoveryBurst()
+        refresh(forceDiscovery: true)
+    }
+
+    private func beginFastDiscoveryBurst() {
+        let now = ProcessInfo.processInfo.systemUptime
+        fastCoreGraphicsDiscoveryUntil = max(
+            fastCoreGraphicsDiscoveryUntil,
+            now + 0.75
+        )
     }
 
     private func activatePrompt(
@@ -777,11 +866,14 @@ final class AuthorizationPromptMonitor: NSObject {
     }
 
     private func report(isShowingPanel: Bool) {
-        statusHandler(
-            AuthorizationMonitorStatus(
-                accessibilityTrusted: AccessibilityFocusReader.isTrusted,
-                isShowingPanel: isShowingPanel
-            )
+        let status = AuthorizationMonitorStatus(
+            accessibilityTrusted: AccessibilityFocusReader.isTrusted,
+            isShowingPanel: isShowingPanel
         )
+        guard status != lastReportedStatus else {
+            return
+        }
+        lastReportedStatus = status
+        statusHandler(status)
     }
 }

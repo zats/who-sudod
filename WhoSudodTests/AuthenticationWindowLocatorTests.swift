@@ -33,6 +33,30 @@ final class AuthenticationWindowLocatorTests: XCTestCase {
         )
     }
 
+    func testCoreGraphicsPrefilterAcceptsOnlyKnownPresenterNames() {
+        for name in [
+            "SecurityAgent",
+            "coreautha",
+            "LocalAuthenticationRemoteService"
+        ] {
+            XCTAssertTrue(
+                AuthenticationPresenterMatcher.isPossibleCoreGraphicsPresenter(
+                    processName: name
+                ),
+                name
+            )
+        }
+
+        for name in [nil, "ChatGPT", "SecurityAgent copy", "sudo"] {
+            XCTAssertFalse(
+                AuthenticationPresenterMatcher.isPossibleCoreGraphicsPresenter(
+                    processName: name
+                ),
+                name ?? "nil"
+            )
+        }
+    }
+
     func testAcceptsKnownSystemPathWhenBundleMetadataIsUnavailable() {
         XCTAssertEqual(
             AuthenticationPresenterMatcher.kind(

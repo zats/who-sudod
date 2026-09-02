@@ -121,6 +121,9 @@ final class AuthenticationProcessSnapshotTests: XCTestCase {
 
         var status = stat()
         XCTAssertEqual(fstat(slave, &status), 0)
+        let devicePath = try XCTUnwrap(
+            TerminalInputModeReader.devicePath(for: status.st_rdev)
+        )
         var original = termios()
         XCTAssertEqual(tcgetattr(slave, &original), 0)
         defer { _ = tcsetattr(slave, TCSANOW, &original) }
@@ -129,21 +132,30 @@ final class AuthenticationProcessSnapshotTests: XCTestCase {
         attributes.c_lflag |= tcflag_t(ECHO | ICANON)
         XCTAssertEqual(tcsetattr(slave, TCSANOW, &attributes), 0)
         XCTAssertEqual(
-            TerminalInputModeReader.read(device: status.st_rdev),
+            TerminalInputModeReader.read(
+                device: status.st_rdev,
+                devicePath: devicePath
+            ),
             TerminalInputMode(echoEnabled: true, canonicalInputEnabled: true)
         )
 
         attributes.c_lflag &= ~tcflag_t(ECHO)
         XCTAssertEqual(tcsetattr(slave, TCSANOW, &attributes), 0)
         XCTAssertEqual(
-            TerminalInputModeReader.read(device: status.st_rdev)?.isPasswordEntryMode,
+            TerminalInputModeReader.read(
+                device: status.st_rdev,
+                devicePath: devicePath
+            )?.isPasswordEntryMode,
             true
         )
 
         attributes.c_lflag &= ~tcflag_t(ICANON)
         XCTAssertEqual(tcsetattr(slave, TCSANOW, &attributes), 0)
         XCTAssertEqual(
-            TerminalInputModeReader.read(device: status.st_rdev)?.isPasswordEntryMode,
+            TerminalInputModeReader.read(
+                device: status.st_rdev,
+                devicePath: devicePath
+            )?.isPasswordEntryMode,
             false
         )
     }

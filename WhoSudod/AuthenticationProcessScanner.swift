@@ -260,6 +260,13 @@ struct TerminalInputMode: Equatable, Sendable {
 
 enum TerminalInputModeReader {
     static func read(device: dev_t) -> TerminalInputMode? {
+        guard let devicePath = devicePath(for: device) else {
+            return nil
+        }
+        return read(device: device, devicePath: devicePath)
+    }
+
+    static func devicePath(for device: dev_t) -> String? {
         let noDevice = dev_t(bitPattern: UInt32.max)
         guard device != noDevice else {
             return nil
@@ -281,9 +288,12 @@ enum TerminalInputModeReader {
         guard !deviceName.isEmpty, !deviceName.contains("/") else {
             return nil
         }
+        return "/dev/\(deviceName)"
+    }
 
+    static func read(device: dev_t, devicePath: String) -> TerminalInputMode? {
         let descriptor = open(
-            "/dev/\(deviceName)",
+            devicePath,
             O_RDONLY | O_NONBLOCK | O_NOCTTY | O_CLOEXEC
         )
         guard descriptor >= 0 else {
@@ -331,6 +341,7 @@ actor AuthenticationProcessScanner {
 
     private var processArgumentsByIdentity: [ProcessIdentity: [String]] = [:]
     private var processArgumentReadAttempts: [ProcessIdentity: Int] = [:]
+    private var terminalDevicePaths: [dev_t: String] = [:]
     private var terminalPasswordModeTracker = TerminalPasswordModeTracker()
 
     func snapshot(
@@ -686,9 +697,24 @@ actor AuthenticationProcessScanner {
                 return process.controllingTerminalDevice
             }
         )
+        terminalDevicePaths = terminalDevicePaths.filter {
+            devices.contains($0.key)
+        }
         return Dictionary(
             uniqueKeysWithValues: devices.compactMap { device in
-                TerminalInputModeReader.read(device: device).map { (device, $0) }
+                let devicePath: String
+                if let cached = terminalDevicePaths[device] {
+                    devicePath = cached
+                } else if let resolved = TerminalInputModeReader.devicePath(for: device) {
+                    terminalDevicePaths[device] = resolved
+                    devicePath = resolved
+                } else {
+                    return nil
+                }
+                return TerminalInputModeReader.read(
+                    device: device,
+                    devicePath: devicePath
+                ).map { (device, $0) }
             }
         )
     }

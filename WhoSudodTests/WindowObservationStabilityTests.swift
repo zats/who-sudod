@@ -30,6 +30,75 @@ final class WindowObservationStabilityTests: XCTestCase {
         XCTAssertEqual(stability.consecutiveMisses, 1)
     }
 
+    func testForcedDiscoveryInspectsCoreGraphicsBeforeFallbackDeadline() {
+        XCTAssertTrue(
+            AuthenticationWindowDiscoveryPolicy.shouldInspectCoreGraphics(
+                forceDiscovery: true,
+                hasActiveSystemPrompt: false,
+                isInFastDiscoveryBurst: false,
+                now: 10,
+                nextFallbackTime: 20
+            )
+        )
+    }
+
+    func testActiveSystemPromptInspectsCoreGraphicsBeforeFallbackDeadline() {
+        XCTAssertTrue(
+            AuthenticationWindowDiscoveryPolicy.shouldInspectCoreGraphics(
+                forceDiscovery: false,
+                hasActiveSystemPrompt: true,
+                isInFastDiscoveryBurst: false,
+                now: 10,
+                nextFallbackTime: 20
+            )
+        )
+    }
+
+    func testFastDiscoveryBurstInspectsCoreGraphicsBeforeFallbackDeadline() {
+        XCTAssertTrue(
+            AuthenticationWindowDiscoveryPolicy.shouldInspectCoreGraphics(
+                forceDiscovery: false,
+                hasActiveSystemPrompt: false,
+                isInFastDiscoveryBurst: true,
+                now: 10,
+                nextFallbackTime: 20
+            )
+        )
+    }
+
+    func testIdleMonitorSkipsCoreGraphicsBeforeFallbackDeadline() {
+        XCTAssertFalse(
+            AuthenticationWindowDiscoveryPolicy.shouldInspectCoreGraphics(
+                forceDiscovery: false,
+                hasActiveSystemPrompt: false,
+                isInFastDiscoveryBurst: false,
+                now: 19.999,
+                nextFallbackTime: 20
+            )
+        )
+    }
+
+    func testIdleMonitorInspectsCoreGraphicsAtAndAfterFallbackDeadline() {
+        XCTAssertTrue(
+            AuthenticationWindowDiscoveryPolicy.shouldInspectCoreGraphics(
+                forceDiscovery: false,
+                hasActiveSystemPrompt: false,
+                isInFastDiscoveryBurst: false,
+                now: 20,
+                nextFallbackTime: 20
+            )
+        )
+        XCTAssertTrue(
+            AuthenticationWindowDiscoveryPolicy.shouldInspectCoreGraphics(
+                forceDiscovery: false,
+                hasActiveSystemPrompt: false,
+                isInFastDiscoveryBurst: false,
+                now: 20.001,
+                nextFallbackTime: 20
+            )
+        )
+    }
+
     func testTerminalPromptKeepsObservedCurrentRequest() {
         XCTAssertEqual(
             TerminalPromptObservationResolution.resolve(

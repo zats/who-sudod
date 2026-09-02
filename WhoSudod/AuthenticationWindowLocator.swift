@@ -278,6 +278,15 @@ enum AuthenticationPresenterMatcher {
     static let securityAgentPath = "/System/Library/Frameworks/Security.framework/Versions/A/MachServices/SecurityAgent.bundle/Contents/MacOS/SecurityAgent"
     static let coreAuthenticationPath = "/System/Library/Frameworks/LocalAuthentication.framework/Support/coreautha.bundle/Contents/MacOS/coreautha"
     static let remoteServicePath = "/System/Library/PrivateFrameworks/LocalAuthenticationUI.framework/Versions/A/XPCServices/LocalAuthenticationRemoteService.xpc/Contents/MacOS/LocalAuthenticationRemoteService"
+    private static let coreGraphicsProcessNames: Set<String> = [
+        "SecurityAgent",
+        "coreautha",
+        "LocalAuthenticationRemoteService"
+    ]
+
+    static func isPossibleCoreGraphicsPresenter(processName: String?) -> Bool {
+        processName.map(coreGraphicsProcessNames.contains) ?? false
+    }
 
     static func kind(
         bundleIdentifier: String?,
@@ -307,16 +316,23 @@ enum AuthenticationPresenterMatcher {
 
 @MainActor
 enum AuthenticationWindowLocator {
+    private static var displayCache: [DisplayGeometry]?
+
+    static func invalidateDisplayCache() {
+        displayCache = nil
+    }
+
     static func onScreenCoreGraphicsCandidates() -> [AuthenticationWindowSnapshot] {
         let windowInfo = CGWindowListCopyWindowInfo(
             [.optionOnScreenOnly, .excludeDesktopElements],
             .zero
         ) as? [[String: Any]] ?? []
-        return snapshots(from: windowInfo)
+        return snapshots(from: windowInfo, requiresKnownOwnerName: true)
     }
 
     static func frontmostCandidate(
-        from coreGraphicsCandidates: [AuthenticationWindowSnapshot]? = nil
+        from coreGraphicsCandidates: [AuthenticationWindowSnapshot]? = nil,
+        frontmostProcessID: pid_t?
     ) -> AuthenticationWindowSnapshot? {
         let candidates = coreGraphicsCandidates ?? onScreenCoreGraphicsCandidates()
 
@@ -325,8 +341,16 @@ enum AuthenticationWindowLocator {
         }
         return AuthenticationWindowAccessibilityFallback.resolve(
             coreGraphicsCandidates: candidates,
-            accessibilityCandidate: accessibilityCandidate()
+            accessibilityCandidate: accessibilityCandidate(
+                frontmostProcessID: frontmostProcessID
+            )
         )
+    }
+
+    static func frontmostAccessibilityCandidate(
+        processID: pid_t?
+    ) -> AuthenticationWindowSnapshot? {
+        accessibilityCandidate(frontmostProcessID: processID)
     }
 
     static func snapshot(identity: AuthenticationWindowIdentity) -> AuthenticationWindowSnapshot? {
@@ -336,14 +360,22 @@ enum AuthenticationWindowLocator {
                 [.optionIncludingWindow],
                 windowID
             ) as? [[String: Any]] ?? []
-            return snapshots(from: windowInfo).first { $0.identity == identity }
+            return snapshots(
+                from: windowInfo,
+                requiresKnownOwnerName: false
+            ).first { $0.identity == identity }
         case let .accessibility(processID):
             return accessibilitySnapshot(processID: processID)
         }
     }
 
-    private static func snapshots(from windowInfo: [[String: Any]]) -> [AuthenticationWindowSnapshot] {
+    private static func snapshots(
+        from windowInfo: [[String: Any]],
+        requiresKnownOwnerName: Bool
+    ) -> [AuthenticationWindowSnapshot] {
         let displays = currentDisplays()
+        var surfaceKindsByProcessID: [pid_t: AuthenticationSurfaceKind] = [:]
+        var unsupportedProcessIDs: Set<pid_t> = []
         return windowInfo.compactMap { info in
             guard
                 let processIDNumber = info[kCGWindowOwnerPID as String] as? NSNumber,
@@ -353,10 +385,25 @@ enum AuthenticationWindowLocator {
             else {
                 return nil
             }
+            if requiresKnownOwnerName,
+               !AuthenticationPresenterMatcher.isPossibleCoreGraphicsPresenter(
+                   processName: info[kCGWindowOwnerName as String] as? String
+               ) {
+                return nil
+            }
 
             let processID = pid_t(processIDNumber.int32Value)
-            guard let surfaceKind = authenticationSurfaceKind(processID: processID) else {
-                return nil
+            let surfaceKind: AuthenticationSurfaceKind
+            if let cached = surfaceKindsByProcessID[processID] {
+                surfaceKind = cached
+            } else {
+                guard !unsupportedProcessIDs.contains(processID),
+                      let resolved = authenticationSurfaceKind(processID: processID) else {
+                    unsupportedProcessIDs.insert(processID)
+                    return nil
+                }
+                surfaceKindsByProcessID[processID] = resolved
+                surfaceKind = resolved
             }
 
             let frame = CGRect(
@@ -383,18 +430,17 @@ enum AuthenticationWindowLocator {
         }
     }
 
-    private static func accessibilityCandidate() -> AuthenticationWindowSnapshot? {
-        for application in NSWorkspace.shared.runningApplications {
-            let processID = application.processIdentifier
-            guard let snapshot = accessibilitySnapshot(processID: processID) else {
-                continue
-            }
-            guard isFocused(snapshot) else {
-                continue
-            }
-            return snapshot
+    private static func accessibilityCandidate(
+        frontmostProcessID: pid_t?
+    ) -> AuthenticationWindowSnapshot? {
+        guard let frontmostProcessID else {
+            return nil
         }
-        return nil
+        guard let snapshot = accessibilitySnapshot(processID: frontmostProcessID),
+              isFocused(snapshot) else {
+            return nil
+        }
+        return snapshot
     }
 
     private static func isFocused(_ snapshot: AuthenticationWindowSnapshot) -> Bool {
@@ -407,12 +453,27 @@ enum AuthenticationWindowLocator {
     private static func accessibilitySnapshot(
         processID: pid_t
     ) -> AuthenticationWindowSnapshot? {
-        AuthenticationWindowSnapshotFactory.accessibilitySnapshot(
+        return accessibilitySnapshot(
             processID: processID,
-            bundleIdentifier: NSRunningApplication(
-                processIdentifier: processID
-            )?.bundleIdentifier,
-            executablePath: executablePath(for: processID),
+            bundleIdentifier: nil
+        )
+    }
+
+    private static func accessibilitySnapshot(
+        processID: pid_t,
+        bundleIdentifier: String?
+    ) -> AuthenticationWindowSnapshot? {
+        let verifiedExecutablePath = executablePath(for: processID)
+        guard AuthenticationPresenterMatcher.kind(
+            bundleIdentifier: bundleIdentifier,
+            executablePath: verifiedExecutablePath
+        ) == .localAuthentication else {
+            return nil
+        }
+        return AuthenticationWindowSnapshotFactory.accessibilitySnapshot(
+            processID: processID,
+            bundleIdentifier: bundleIdentifier,
+            executablePath: verifiedExecutablePath,
             focusedFrame: AccessibilityFocusReader.focusedWindowFrame(
                 processID: processID
             ),
@@ -421,9 +482,8 @@ enum AuthenticationWindowLocator {
     }
 
     private static func authenticationSurfaceKind(processID: pid_t) -> AuthenticationSurfaceKind? {
-        let bundleIdentifier = NSRunningApplication(processIdentifier: processID)?.bundleIdentifier
         return AuthenticationPresenterMatcher.kind(
-            bundleIdentifier: bundleIdentifier,
+            bundleIdentifier: nil,
             executablePath: executablePath(for: processID)
         )
     }
@@ -443,7 +503,10 @@ enum AuthenticationWindowLocator {
     }
 
     static func currentDisplays() -> [DisplayGeometry] {
-        NSScreen.screens.compactMap { screen in
+        if let displayCache {
+            return displayCache
+        }
+        let displays: [DisplayGeometry] = NSScreen.screens.compactMap { screen in
             guard let number = screen.deviceDescription[.init("NSScreenNumber")] as? NSNumber else {
                 return nil
             }
@@ -453,6 +516,8 @@ enum AuthenticationWindowLocator {
                 coreGraphicsFrame: CGDisplayBounds(CGDirectDisplayID(number.uint32Value))
             )
         }
+        displayCache = displays
+        return displays
     }
 
     private static func number(_ value: Any?) -> CGFloat {
