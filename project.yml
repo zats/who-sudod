@@ -83,8 +83,10 @@ targets:
       - path: WhoSudodPAMInstaller/PAMMutationTransaction.swift
       - path: WhoSudodPAMInstaller/PAMOperationAuthorization.swift
       - path: WhoSudodPAMInstaller/PAMInstallerMutationAuthorizationGate.swift
+      - path: WhoSudodPAMInstaller/PAMInstallerClientAuditSession.swift
     dependencies:
       - target: WhoSudod
+      - sdk: libbsm.tbd
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.zats.WhoSudodTests
@@ -126,6 +128,7 @@ targets:
         SWIFT_OBJC_BRIDGING_HEADER: "$(SRCROOT)/WhoSudodPAMInstaller/WhoSudodPAMInstaller-Bridging-Header.h"
     dependencies:
       - sdk: libManagedConfigurationFiles.tbd
+      - sdk: libbsm.tbd
 
   WhoSudodPAM:
     type: library.dynamic

@@ -66,6 +66,7 @@ final class PAMInstallerLifecycle: @unchecked Sendable {
 final class PAMInstallerService: NSObject, PAMInstallerXPCProtocol {
     private let files = PAMInstallerFileManager()
     private let mutationAuthorizationGate = PAMInstallerMutationAuthorizationGate()
+    private let clientAuditSessionGate = PAMInstallerClientAuditSessionGate()
     private let lock = NSLock()
     private let lifecycle: PAMInstallerLifecycle
 
@@ -134,12 +135,35 @@ final class PAMInstallerService: NSObject, PAMInstallerXPCProtocol {
         reply: @escaping (Int, String?, String?) -> Void
     ) {
         lifecycle.beginOperation()
+        guard let connection = NSXPCConnection.current() else {
+            let result = PAMInstallerMutationResult(
+                inspection: files.inspect(),
+                operationError: PAMInstallerClientAuditSessionError.unavailable
+                    .localizedDescription
+            )
+            reply(
+                result.inspection.state.rawValue,
+                result.inspection.detail,
+                result.operationError
+            )
+            lifecycle.endOperation()
+            return
+        }
+        let clientAuditSession = PAMInstallerClientAuditSession(
+            userIdentifier: connection.effectiveUserIdentifier,
+            sessionIdentifier: connection.auditSessionIdentifier
+        )
         let result = lock.withLock {
             do {
                 return try mutationAuthorizationGate.perform(
                     authorization: authorization,
                     expectedBuildIdentity: expectedBuildIdentity,
-                    operation: operation
+                    operation: {
+                        try clientAuditSessionGate.perform(
+                            client: clientAuditSession,
+                            operation: operation
+                        )
+                    }
                 )
             } catch {
                 return PAMInstallerMutationResult(

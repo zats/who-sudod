@@ -50,6 +50,7 @@ final class PAMIntegrationController {
     private let bundleURL: URL
     private let service: PAMHelperServiceControlling
     private let helper: PAMHelperCalling
+    private let systemAdministrationAccess: PAMSystemAdministrationAccessAuthorizing
     private let authorizer: PAMOperationAuthorizing
     private let recoveryStore: PAMUninstallRecoveryStoring
     private let localInspectionOverride: (() -> PAMIntegrationInspection)?
@@ -66,6 +67,7 @@ final class PAMIntegrationController {
         bundleURL: URL = Bundle.main.bundleURL,
         service: PAMHelperServiceControlling? = nil,
         helper: PAMHelperCalling? = nil,
+        systemAdministrationAccess: PAMSystemAdministrationAccessAuthorizing? = nil,
         authorizer: PAMOperationAuthorizing? = nil,
         recoveryStore: PAMUninstallRecoveryStoring? = nil,
         localInspection: (() -> PAMIntegrationInspection)? = nil
@@ -74,6 +76,8 @@ final class PAMIntegrationController {
         let service = service ?? SystemPAMHelperServiceController()
         self.service = service
         self.helper = helper ?? SystemPAMHelperClient(applicationBundleURL: bundleURL)
+        self.systemAdministrationAccess = systemAdministrationAccess
+            ?? SystemPAMSystemAdministrationAccessAuthorizer()
         self.authorizer = authorizer ?? SystemPAMOperationAuthorizer()
         let recoveryStore = recoveryStore ?? FilePAMUninstallRecoveryStore()
         self.recoveryStore = recoveryStore
@@ -163,6 +167,9 @@ final class PAMIntegrationController {
         guard beginOperation() else {
             return
         }
+        guard requestSystemAdministrationAccess() else {
+            return
+        }
         prepareHelperForMutation { [weak self] identity in
             guard let self else {
                 return
@@ -192,6 +199,9 @@ final class PAMIntegrationController {
         let local = localInspection()
         if local.state == .notInstalled {
             unregisterHelperIfNeeded(integration: local)
+            return
+        }
+        guard requestSystemAdministrationAccess() else {
             return
         }
         prepareHelperForMutation { [weak self] identity in
@@ -377,6 +387,16 @@ final class PAMIntegrationController {
         } catch {
             updateOperationError(error.localizedDescription)
             return nil
+        }
+    }
+
+    private func requestSystemAdministrationAccess() -> Bool {
+        do {
+            try systemAdministrationAccess.requestAccess()
+            return true
+        } catch {
+            stopOperation(with: error.localizedDescription)
+            return false
         }
     }
 

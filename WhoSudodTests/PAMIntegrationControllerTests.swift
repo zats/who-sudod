@@ -3,6 +3,7 @@ import XCTest
 @testable import WhoSudod
 
 enum PAMTestCall: Equatable {
+    case requestSystemAdministrationAccess
     case register
     case unregister
     case openApprovalSettings
@@ -252,7 +253,28 @@ final class FakePAMOperationAuthorizer: PAMOperationAuthorizing {
     }
 }
 
+final class FakePAMSystemAdministrationAccessAuthorizer:
+    PAMSystemAdministrationAccessAuthorizing
+{
+    var error: Error?
+
+    private let recorder: PAMTestCallRecorder
+
+    init(error: Error?, recorder: PAMTestCallRecorder) {
+        self.error = error
+        self.recorder = recorder
+    }
+
+    func requestAccess() throws {
+        recorder.calls.append(.requestSystemAdministrationAccess)
+        if let error {
+            throw error
+        }
+    }
+}
+
 private enum PAMControllerTestError: LocalizedError {
+    case systemAdministrationAccess
     case registration
     case authorization
     case unregistration
@@ -260,6 +282,8 @@ private enum PAMControllerTestError: LocalizedError {
 
     var errorDescription: String? {
         switch self {
+        case .systemAdministrationAccess:
+            "System administration access failed."
         case .registration:
             "Registration failed."
         case .authorization:
@@ -296,7 +320,13 @@ final class PAMIntegrationControllerTests: XCTestCase {
 
         XCTAssertEqual(
             values.recorder.calls,
-            [.register, .preflight, .authorize, .install(values.authorization)]
+            [
+                .requestSystemAdministrationAccess,
+                .register,
+                .preflight,
+                .authorize,
+                .install(values.authorization),
+            ]
         )
         XCTAssertEqual(values.controller.snapshot.integration.state, .installed)
         XCTAssertEqual(values.controller.snapshot.helper, .enabled)
@@ -310,7 +340,12 @@ final class PAMIntegrationControllerTests: XCTestCase {
 
         XCTAssertEqual(
             values.recorder.calls,
-            [.preflight, .authorize, .install(values.authorization)]
+            [
+                .requestSystemAdministrationAccess,
+                .preflight,
+                .authorize,
+                .install(values.authorization),
+            ]
         )
         XCTAssertEqual(values.controller.snapshot.integration.state, .installed)
         XCTAssertEqual(values.helper.installBuildIdentity, values.helper.buildIdentity)
@@ -323,13 +358,17 @@ final class PAMIntegrationControllerTests: XCTestCase {
 
         values.controller.install()
 
-        XCTAssertEqual(values.recorder.calls, [.preflight, .unregister])
+        XCTAssertEqual(
+            values.recorder.calls,
+            [.requestSystemAdministrationAccess, .preflight, .unregister]
+        )
 
         values.service.finishPendingUnregister()
 
         XCTAssertEqual(
             values.recorder.calls,
             [
+                .requestSystemAdministrationAccess,
                 .preflight,
                 .unregister,
                 .register,
@@ -352,7 +391,13 @@ final class PAMIntegrationControllerTests: XCTestCase {
 
         XCTAssertEqual(
             values.recorder.calls,
-            [.preflight, .unregister, .register, .preflight]
+            [
+                .requestSystemAdministrationAccess,
+                .preflight,
+                .unregister,
+                .register,
+                .preflight,
+            ]
         )
         XCTAssertEqual(
             values.controller.snapshot.operationError,
@@ -368,7 +413,10 @@ final class PAMIntegrationControllerTests: XCTestCase {
 
         values.controller.install()
 
-        XCTAssertEqual(values.recorder.calls, [.preflight])
+        XCTAssertEqual(
+            values.recorder.calls,
+            [.requestSystemAdministrationAccess, .preflight]
+        )
         XCTAssertEqual(
             values.controller.snapshot.operationError,
             "Embedded helper is invalid."
@@ -381,7 +429,10 @@ final class PAMIntegrationControllerTests: XCTestCase {
 
         values.controller.install()
 
-        XCTAssertEqual(values.recorder.calls, [.register, .openApprovalSettings])
+        XCTAssertEqual(
+            values.recorder.calls,
+            [.requestSystemAdministrationAccess, .register, .openApprovalSettings]
+        )
         XCTAssertEqual(values.controller.snapshot.helper, .requiresApproval)
         XCTAssertEqual(
             values.controller.snapshot.operationError,
@@ -396,7 +447,10 @@ final class PAMIntegrationControllerTests: XCTestCase {
 
         values.controller.install()
 
-        XCTAssertEqual(values.recorder.calls, [.register, .openApprovalSettings])
+        XCTAssertEqual(
+            values.recorder.calls,
+            [.requestSystemAdministrationAccess, .register, .openApprovalSettings]
+        )
         XCTAssertEqual(values.controller.snapshot.helper, .requiresApproval)
         XCTAssertEqual(
             values.controller.snapshot.operationError,
@@ -409,11 +463,28 @@ final class PAMIntegrationControllerTests: XCTestCase {
 
         values.controller.install()
 
-        XCTAssertTrue(values.recorder.calls.isEmpty)
+        XCTAssertEqual(values.recorder.calls, [.requestSystemAdministrationAccess])
         XCTAssertEqual(values.controller.snapshot.helper, .unavailable)
         XCTAssertEqual(
             values.controller.snapshot.operationError,
             "The PAM helper is missing from this application build."
+        )
+    }
+
+    func testInstallAccessDenialStopsBeforeHelperPreparationAndMutation() {
+        let values = dependencies(
+            serviceState: .notRegistered,
+            systemAdministrationAccessError: PAMControllerTestError.systemAdministrationAccess
+        )
+
+        values.controller.install()
+
+        XCTAssertEqual(values.recorder.calls, [.requestSystemAdministrationAccess])
+        XCTAssertEqual(values.service.state, .notRegistered)
+        XCTAssertNil(values.helper.installBuildIdentity)
+        XCTAssertEqual(
+            values.controller.snapshot.operationError,
+            "System administration access failed."
         )
     }
 
@@ -425,7 +496,10 @@ final class PAMIntegrationControllerTests: XCTestCase {
 
         values.controller.install()
 
-        XCTAssertEqual(values.recorder.calls, [.preflight, .authorize])
+        XCTAssertEqual(
+            values.recorder.calls,
+            [.requestSystemAdministrationAccess, .preflight, .authorize]
+        )
         XCTAssertNil(values.controller.snapshot.operationError)
     }
 
@@ -437,7 +511,10 @@ final class PAMIntegrationControllerTests: XCTestCase {
 
         values.controller.install()
 
-        XCTAssertEqual(values.recorder.calls, [.preflight, .authorize])
+        XCTAssertEqual(
+            values.recorder.calls,
+            [.requestSystemAdministrationAccess, .preflight, .authorize]
+        )
         XCTAssertEqual(values.controller.snapshot.operationError, "Authorization failed.")
     }
 
@@ -469,10 +546,37 @@ final class PAMIntegrationControllerTests: XCTestCase {
 
         XCTAssertEqual(
             values.recorder.calls,
-            [.preflight, .authorize, .install(values.authorization)]
+            [
+                .requestSystemAdministrationAccess,
+                .preflight,
+                .authorize,
+                .install(values.authorization),
+            ]
         )
         XCTAssertEqual(values.controller.snapshot.integration.state, .installed)
         XCTAssertNil(values.controller.snapshot.operationError)
+    }
+
+    func testRepairAccessDenialStopsBeforeHelperPreparationAndMutation() {
+        let values = dependencies(
+            serviceState: .enabled,
+            systemAdministrationAccessError: PAMControllerTestError.systemAdministrationAccess
+        )
+        values.helper.statusResponse = PAMTestHelperResponse(
+            .needsRepair,
+            detail: "Repair is required."
+        )
+        values.controller.refresh()
+        values.recorder.calls.removeAll()
+
+        values.controller.install()
+
+        XCTAssertEqual(values.recorder.calls, [.requestSystemAdministrationAccess])
+        XCTAssertNil(values.helper.installBuildIdentity)
+        XCTAssertEqual(
+            values.controller.snapshot.operationError,
+            "System administration access failed."
+        )
     }
 
     func testInstallIgnoresAnotherActionUntilTheHelperReplies() {
@@ -485,7 +589,12 @@ final class PAMIntegrationControllerTests: XCTestCase {
 
         XCTAssertEqual(
             values.recorder.calls,
-            [.preflight, .authorize, .install(values.authorization)]
+            [
+                .requestSystemAdministrationAccess,
+                .preflight,
+                .authorize,
+                .install(values.authorization),
+            ]
         )
 
         values.helper.completeInstall(with: pamMutationResult(.installed))
@@ -494,9 +603,11 @@ final class PAMIntegrationControllerTests: XCTestCase {
         XCTAssertEqual(
             values.recorder.calls,
             [
+                .requestSystemAdministrationAccess,
                 .preflight,
                 .authorize,
                 .install(values.authorization),
+                .requestSystemAdministrationAccess,
                 .preflight,
                 .authorize,
                 .uninstall(values.authorization),
@@ -512,11 +623,34 @@ final class PAMIntegrationControllerTests: XCTestCase {
 
         XCTAssertEqual(
             values.recorder.calls,
-            [.preflight, .authorize, .uninstall(values.authorization), .unregister]
+            [
+                .requestSystemAdministrationAccess,
+                .preflight,
+                .authorize,
+                .uninstall(values.authorization),
+                .unregister,
+            ]
         )
         XCTAssertEqual(values.controller.snapshot.helper, .notRegistered)
         XCTAssertNil(values.controller.snapshot.operationError)
         XCTAssertEqual(values.helper.uninstallBuildIdentity, values.helper.buildIdentity)
+    }
+
+    func testUninstallAccessDenialStopsBeforeHelperPreparationAndMutation() {
+        let values = dependencies(
+            serviceState: .enabled,
+            systemAdministrationAccessError: PAMControllerTestError.systemAdministrationAccess
+        )
+
+        values.controller.uninstall()
+
+        XCTAssertEqual(values.recorder.calls, [.requestSystemAdministrationAccess])
+        XCTAssertNil(values.helper.uninstallBuildIdentity)
+        XCTAssertTrue(values.recoveryStore.savedPhases.isEmpty)
+        XCTAssertEqual(
+            values.controller.snapshot.operationError,
+            "System administration access failed."
+        )
     }
 
     func testUninstallWritesPendingPhaseBeforeHelperRepliesAndKeepsItOnFailure() {
@@ -543,7 +677,10 @@ final class PAMIntegrationControllerTests: XCTestCase {
 
         values.controller.uninstall()
 
-        XCTAssertEqual(values.recorder.calls, [.preflight, .authorize])
+        XCTAssertEqual(
+            values.recorder.calls,
+            [.requestSystemAdministrationAccess, .preflight, .authorize]
+        )
         XCTAssertEqual(values.recoveryStore.savedPhases, [.uninstallPending])
         XCTAssertEqual(values.recoveryStore.phase, .none)
         XCTAssertEqual(
@@ -580,7 +717,12 @@ final class PAMIntegrationControllerTests: XCTestCase {
 
         XCTAssertEqual(
             values.recorder.calls,
-            [.preflight, .authorize, .uninstall(values.authorization)]
+            [
+                .requestSystemAdministrationAccess,
+                .preflight,
+                .authorize,
+                .uninstall(values.authorization),
+            ]
         )
         XCTAssertEqual(values.controller.snapshot.integration.state, .needsRepair)
         XCTAssertEqual(
@@ -602,6 +744,7 @@ final class PAMIntegrationControllerTests: XCTestCase {
         values.controller.uninstall()
 
         XCTAssertEqual(values.recorder.calls, [
+            .requestSystemAdministrationAccess,
             .preflight,
             .authorize,
             .uninstall(values.authorization),
@@ -624,6 +767,7 @@ final class PAMIntegrationControllerTests: XCTestCase {
         values.controller.uninstall()
 
         XCTAssertEqual(values.recorder.calls, [
+            .requestSystemAdministrationAccess,
             .preflight,
             .authorize,
             .uninstall(values.authorization),
@@ -658,7 +802,13 @@ final class PAMIntegrationControllerTests: XCTestCase {
 
         XCTAssertEqual(
             values.recorder.calls,
-            [.preflight, .authorize, .uninstall(values.authorization), .unregister]
+            [
+                .requestSystemAdministrationAccess,
+                .preflight,
+                .authorize,
+                .uninstall(values.authorization),
+                .unregister,
+            ]
         )
         XCTAssertEqual(values.controller.snapshot.operationError, "Unregistration failed.")
         XCTAssertEqual(values.controller.snapshot.integration.state, .notInstalled)
@@ -725,6 +875,7 @@ final class PAMIntegrationControllerTests: XCTestCase {
             [
                 .preflight,
                 .status,
+                .requestSystemAdministrationAccess,
                 .preflight,
                 .authorize,
                 .install(values.authorization),
@@ -793,11 +944,13 @@ final class PAMIntegrationControllerTests: XCTestCase {
         serviceState: PAMHelperServiceState,
         localState: PAMIntegrationStateCode = .installed,
         recoveryPhase: PAMUninstallRecoveryPhase = .none,
+        systemAdministrationAccessError: Error? = nil,
         authorizationResult: Result<PAMOperationAuthorization, Error>? = nil
     ) -> (
         controller: PAMIntegrationController,
         service: FakePAMHelperServiceController,
         helper: FakePAMHelperClient,
+        systemAdministrationAccess: FakePAMSystemAdministrationAccessAuthorizer,
         authorizer: FakePAMOperationAuthorizer,
         recorder: PAMTestCallRecorder,
         authorization: Data,
@@ -811,6 +964,10 @@ final class PAMIntegrationControllerTests: XCTestCase {
             recorder: recorder
         )
         let helper = FakePAMHelperClient(recorder: recorder)
+        let systemAdministrationAccess = FakePAMSystemAdministrationAccessAuthorizer(
+            error: systemAdministrationAccessError,
+            recorder: recorder
+        )
         let authorizationValue = PAMOperationAuthorization(
             externalFormData: authorization
         )
@@ -825,6 +982,7 @@ final class PAMIntegrationControllerTests: XCTestCase {
                 .appendingPathComponent("PAMIntegrationControllerTests.app"),
             service: service,
             helper: helper,
+            systemAdministrationAccess: systemAdministrationAccess,
             authorizer: authorizer,
             recoveryStore: recoveryStore,
             localInspection: {
@@ -835,6 +993,7 @@ final class PAMIntegrationControllerTests: XCTestCase {
             controller,
             service,
             helper,
+            systemAdministrationAccess,
             authorizer,
             recorder,
             authorization,

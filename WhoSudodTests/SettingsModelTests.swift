@@ -204,7 +204,12 @@ final class SettingsModelTests: XCTestCase {
 
         XCTAssertEqual(
             values.recorder.calls,
-            [.preflight, .authorize, .install(values.authorization)]
+            [
+                .requestSystemAdministrationAccess,
+                .preflight,
+                .authorize,
+                .install(values.authorization),
+            ]
         )
         XCTAssertEqual(model.pamSnapshot.integration.state, .installed)
     }
@@ -222,7 +227,12 @@ final class SettingsModelTests: XCTestCase {
 
         XCTAssertEqual(
             values.recorder.calls,
-            [.preflight, .authorize, .install(values.authorization)]
+            [
+                .requestSystemAdministrationAccess,
+                .preflight,
+                .authorize,
+                .install(values.authorization),
+            ]
         )
         XCTAssertEqual(model.pamSnapshot.integration.state, .installed)
     }
@@ -240,7 +250,13 @@ final class SettingsModelTests: XCTestCase {
 
         XCTAssertEqual(
             values.recorder.calls,
-            [.preflight, .authorize, .uninstall(values.authorization), .unregister]
+            [
+                .requestSystemAdministrationAccess,
+                .preflight,
+                .authorize,
+                .uninstall(values.authorization),
+                .unregister,
+            ]
         )
         XCTAssertEqual(model.pamSnapshot.helper, .notRegistered)
     }
@@ -380,11 +396,16 @@ final class SettingsModelTests: XCTestCase {
             ),
             recorder: recorder
         )
+        let systemAdministrationAccess = FakePAMSystemAdministrationAccessAuthorizer(
+            error: nil,
+            recorder: recorder
+        )
         let controller = PAMIntegrationController(
             bundleURL: FileManager.default.temporaryDirectory
                 .appendingPathComponent("SettingsModelTests.app"),
             service: service,
             helper: helper,
+            systemAdministrationAccess: systemAdministrationAccess,
             authorizer: authorizer,
             recoveryStore: PAMTestUninstallRecoveryStore(),
             localInspection: {
