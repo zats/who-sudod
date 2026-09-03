@@ -6,7 +6,7 @@ The requested command does not normally start until authentication succeeds. Who
 
 The 46-point envelope corner radius is the measured 26-point SecurityAgent dialog radius plus the 20-point inset. This keeps the inner and outer corner curves concentric.
 
-The app does not modify SecurityAgent or `sudo`. Its optional PAM Password Input feature installs a signed PAM module, a signed terminal reader, and two owned lines around the standard password entry in `/etc/pam.d/sudo`. Install, repair, and uninstall are explicit menu actions. The installer keeps all other PAM entries and their order. It refuses a PAM configuration that it cannot update without changing password behavior. SIP can stay enabled. All process inspection and password transfer stay on the Mac.
+The app does not modify SecurityAgent or the `sudo` executable. Its optional PAM Password Input feature installs a signed PAM module, a signed terminal reader, and two owned lines around the standard password entry in `/etc/pam.d/sudo`. Install, repair, and uninstall are explicit actions in **Settings > General**. A signed helper requests macOS administrator authorization for each change. It keeps all other PAM entries and their order. It refuses a PAM configuration that it cannot update without changing password behavior. SIP can stay enabled. All process inspection and password transfer stay on the Mac.
 
 ## Run
 
@@ -24,7 +24,7 @@ The app does not modify SecurityAgent or `sudo`. Its optional PAM Password Input
    ```
 
 3. The bundled Permiso assistant opens **System Settings > Privacy & Security > Device Control and Data Access** and shows how to add Who Sudo'd. This category is named **Accessibility** on older macOS versions. Until access is allowed, Who Sudo'd does not inspect processes or show the companion window. Accessibility access lets the app verify and follow the system authentication window. It does not let the app read a password.
-4. To use the app as an optional password input for terminal `sudo`, select **Install PAM Password Input…** in the menu bar menu. The system can ask you to approve the signed installer service. A restart is not required.
+4. To use the app as an optional password input for terminal `sudo`, open **Settings > General** and select **Install…**. macOS asks for administrator approval, and the app's signed helper makes the change. A restart is not required.
 5. Start an operation that needs authentication. Examples include `sudo -k /bin/echo who-sudod-check`, an Authorization Services request, or an app that uses LocalAuthentication.
 
 Who Sudo'd runs as a menu bar app. Its key icon shows the current monitor state.

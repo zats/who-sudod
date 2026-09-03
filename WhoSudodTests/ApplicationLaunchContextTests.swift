@@ -46,6 +46,54 @@ final class ApplicationLaunchContextTests: XCTestCase {
         XCTAssertFalse(image.representations.isEmpty)
     }
 
+    @MainActor
+    func testStatusMenuDoesNotContainPAMControls() {
+        let delegate = AppDelegate()
+        let menu = delegate.makeStatusMenu().menu
+        let actionTitles = menu.items
+            .filter { !$0.isSeparatorItem }
+            .map(\.title)
+
+        XCTAssertEqual(
+            actionTitles,
+            [
+                "Request Accessibility Access…",
+                "Settings…",
+                "Quit Who Sudo'd"
+            ]
+        )
+        XCTAssertFalse(actionTitles.contains { $0.localizedCaseInsensitiveContains("PAM") })
+        XCTAssertFalse(delegate.dependenciesAreLoaded)
+    }
+
+    @MainActor
+    func testTestHostLaunchDoesNotLoadProductionDependencies() {
+        let delegate = AppDelegate(
+            environment: ["XCTestConfigurationFilePath": "/tmp/tests.xctestconfiguration"]
+        )
+
+        delegate.applicationDidFinishLaunching(
+            Notification(name: NSApplication.didFinishLaunchingNotification)
+        )
+
+        XCTAssertFalse(delegate.dependenciesAreLoaded)
+    }
+
+    @MainActor
+    func testTestHostReopenDoesNotLoadProductionDependencies() {
+        let delegate = AppDelegate(
+            environment: ["XCTestConfigurationFilePath": "/tmp/tests.xctestconfiguration"]
+        )
+
+        let shouldHandleReopen = delegate.applicationShouldHandleReopen(
+            NSApplication.shared,
+            hasVisibleWindows: false
+        )
+
+        XCTAssertFalse(shouldHandleReopen)
+        XCTAssertFalse(delegate.dependenciesAreLoaded)
+    }
+
     private func keyEvent(
         character: String,
         modifiers: NSEvent.ModifierFlags

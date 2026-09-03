@@ -2,55 +2,6 @@ import AppKit
 import UniformTypeIdentifiers
 
 @MainActor
-final class IgnoredApplicationsSettingsWindowController: NSWindowController, NSWindowDelegate {
-    private let settingsViewController: IgnoredApplicationsSettingsViewController
-    private let didClose: () -> Void
-
-    init(
-        store: IgnoredApplicationsStore,
-        didClose: @escaping () -> Void
-    ) {
-        settingsViewController = IgnoredApplicationsSettingsViewController(store: store)
-        self.didClose = didClose
-        let window = NSWindow(contentViewController: settingsViewController)
-        window.title = "Ignored Applications"
-        window.styleMask = [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView]
-        window.titlebarAppearsTransparent = true
-        window.toolbarStyle = .unified
-        let toolbar = NSToolbar(identifier: "WhoSudodSettingsToolbar")
-        toolbar.displayMode = .iconOnly
-        window.toolbar = toolbar
-        window.setContentSize(NSSize(width: 680, height: 540))
-        window.minSize = NSSize(width: 560, height: 460)
-        window.isReleasedWhenClosed = false
-        window.setFrameAutosaveName("WhoSudodIgnoredApplicationsSettings")
-        super.init(window: window)
-        window.delegate = self
-    }
-
-    @available(*, unavailable)
-    required init?(coder: NSCoder) {
-        fatalError("init(coder:) has not been implemented")
-    }
-
-    func present() {
-        settingsViewController.reload()
-        showWindow(nil)
-        window?.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
-        settingsViewController.focusApplicationList()
-        DispatchQueue.main.async { [weak self] in
-            self?.window?.makeKey()
-            self?.settingsViewController.focusApplicationList()
-        }
-    }
-
-    func windowWillClose(_ notification: Notification) {
-        didClose()
-    }
-}
-
-@MainActor
 final class IgnoredApplicationsTableView: NSTableView {
     var deleteSelection: (() -> Void)?
 
@@ -65,7 +16,7 @@ final class IgnoredApplicationsTableView: NSTableView {
 }
 
 @MainActor
-private final class IgnoredApplicationsSettingsViewController: NSViewController,
+final class IgnoredApplicationsSettingsViewController: NSViewController,
     NSTableViewDataSource,
     NSTableViewDelegate {
     private let store: IgnoredApplicationsStore
@@ -103,8 +54,8 @@ private final class IgnoredApplicationsSettingsViewController: NSViewController,
             identifier: NSUserInterfaceItemIdentifier(IgnoredApplicationsSortColumn.application.rawValue)
         )
         applicationColumn.title = "Application"
-        applicationColumn.minWidth = 220
-        applicationColumn.width = 330
+        applicationColumn.minWidth = 180
+        applicationColumn.width = 230
         applicationColumn.resizingMask = .autoresizingMask
         applicationColumn.sortDescriptorPrototype = NSSortDescriptor(
             key: IgnoredApplicationsSortColumn.application.rawValue,
@@ -115,8 +66,8 @@ private final class IgnoredApplicationsSettingsViewController: NSViewController,
             identifier: NSUserInterfaceItemIdentifier(IgnoredApplicationsSortColumn.dialogs.rawValue)
         )
         dialogsColumn.title = "Ignored Dialogs"
-        dialogsColumn.minWidth = 220
-        dialogsColumn.width = 280
+        dialogsColumn.minWidth = 175
+        dialogsColumn.width = 200
         dialogsColumn.resizingMask = .userResizingMask
         dialogsColumn.sortDescriptorPrototype = NSSortDescriptor(
             key: IgnoredApplicationsSortColumn.dialogs.rawValue,
@@ -552,11 +503,10 @@ private final class IgnoredDialogsCellView: NSTableCellView, NSMenuDelegate {
         addSubview(popUpButton)
 
         NSLayoutConstraint.activate([
-            popUpButton.leadingAnchor.constraint(greaterThanOrEqualTo: leadingAnchor, constant: 10),
-            popUpButton.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -10),
+            popUpButton.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 10),
+            popUpButton.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -20),
             popUpButton.centerYAnchor.constraint(equalTo: centerYAnchor),
-            popUpButton.heightAnchor.constraint(equalToConstant: 30),
-            popUpButton.widthAnchor.constraint(greaterThanOrEqualToConstant: 170)
+            popUpButton.heightAnchor.constraint(equalToConstant: 30)
         ])
     }
 

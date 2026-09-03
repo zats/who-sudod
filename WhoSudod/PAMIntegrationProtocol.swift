@@ -1,12 +1,15 @@
+import CryptoKit
 import Foundation
+import Security
 
 enum PAMIntegrationConstants {
     static let machServiceName = "com.zats.WhoSudo.PAMInstaller"
     static let launchDaemonPlistName = "com.zats.WhoSudo.PAMInstaller.plist"
     static let applicationSigningRequirement = "anchor apple generic and identifier \"com.zats.WhoSudo\" and certificate leaf[subject.OU] = \"5KE88HWMKJ\""
-    static let installerSigningRequirement = "anchor apple generic and identifier \"com.zats.WhoSudo.PAMInstaller\" and certificate leaf[subject.OU] = \"5KE88HWMKJ\""
+    static let helperSigningRequirement = "anchor apple generic and identifier \"com.zats.WhoSudo.PAMInstaller\" and certificate leaf[subject.OU] = \"5KE88HWMKJ\""
     static let moduleSigningRequirement = "anchor apple generic and identifier \"com.zats.WhoSudo.PAM\" and certificate leaf[subject.OU] = \"5KE88HWMKJ\""
     static let terminalReaderSigningRequirement = "anchor apple generic and identifier \"com.zats.WhoSudo.PAMTerminalReader\" and certificate leaf[subject.OU] = \"5KE88HWMKJ\""
+    static let modificationAuthorizationRight = "system.privilege.admin"
 
     static let sudoConfigurationPath = "/etc/pam.d/sudo"
     static let installationDirectoryPath = "/Library/Security/WhoSudod"
@@ -14,9 +17,232 @@ enum PAMIntegrationConstants {
     static let installedTerminalReaderPath = "/Library/Security/WhoSudod/whosudod-pam-terminal-reader"
     static let embeddedModuleRelativePath = "Contents/Library/PAMModules/pam_whosudod.so"
     static let embeddedTerminalReaderRelativePath = "Contents/Library/PAMModules/whosudod-pam-terminal-reader"
+    static let embeddedHelperRelativePath = "Contents/Library/LaunchServices/WhoSudodPAMInstaller"
 
     static let ownedOfferConfigurationLine = "auth       optional       /Library/Security/WhoSudod/pam_whosudod.so       whosudod_offer_v1"
     static let ownedRestoreConfigurationLine = "auth       optional       /Library/Security/WhoSudod/pam_whosudod.so       whosudod_restore_v1"
+}
+
+struct PAMHelperBuildIdentity: Equatable, Sendable {
+    let applicationCodeDirectoryHash: Data
+    let helperCodeDirectoryHash: Data
+    let token: Data
+
+    init(applicationCodeDirectoryHash: Data, helperCodeDirectoryHash: Data) {
+        self.applicationCodeDirectoryHash = applicationCodeDirectoryHash
+        self.helperCodeDirectoryHash = helperCodeDirectoryHash
+        token = Self.encodedToken(
+            applicationHash: applicationCodeDirectoryHash,
+            helperHash: helperCodeDirectoryHash
+        )
+    }
+
+    func matches(token expectedToken: Data) -> Bool {
+        guard token.count == expectedToken.count else {
+            return false
+        }
+        var difference: UInt8 = 0
+        for (actual, expected) in zip(token, expectedToken) {
+            difference |= actual ^ expected
+        }
+        return difference == 0
+    }
+
+    func exactApplicationSigningRequirement() throws -> String {
+        try exactSigningRequirement(
+            base: PAMIntegrationConstants.applicationSigningRequirement,
+            codeDirectoryHash: applicationCodeDirectoryHash
+        )
+    }
+
+    func exactHelperSigningRequirement() throws -> String {
+        try exactSigningRequirement(
+            base: PAMIntegrationConstants.helperSigningRequirement,
+            codeDirectoryHash: helperCodeDirectoryHash
+        )
+    }
+
+    static func embedded(in applicationBundleURL: URL) throws -> Self {
+        let applicationURL = applicationBundleURL.standardizedFileURL
+        let helperURL = applicationURL.appendingPathComponent(
+            PAMIntegrationConstants.embeddedHelperRelativePath
+        )
+        let applicationCode = try validatedStaticCode(
+            at: applicationURL,
+            requirement: PAMIntegrationConstants.applicationSigningRequirement,
+            checksNestedCode: true
+        )
+        let helperCode = try validatedStaticCode(
+            at: helperURL,
+            requirement: PAMIntegrationConstants.helperSigningRequirement,
+            checksNestedCode: false
+        )
+        return Self(
+            applicationCodeDirectoryHash: try codeDirectoryHash(for: applicationCode),
+            helperCodeDirectoryHash: try codeDirectoryHash(for: helperCode)
+        )
+    }
+
+    static func currentHelper() throws -> Self {
+        var runningCode: SecCode?
+        var status = SecCodeCopySelf([], &runningCode)
+        guard status == errSecSuccess, let runningCode else {
+            throw PAMHelperBuildIdentityError.cannotReadCode(status)
+        }
+
+        var helperCode: SecStaticCode?
+        status = SecCodeCopyStaticCode(runningCode, [], &helperCode)
+        guard status == errSecSuccess, let helperCode else {
+            throw PAMHelperBuildIdentityError.cannotReadCode(status)
+        }
+        try validate(
+            helperCode,
+            requirement: PAMIntegrationConstants.helperSigningRequirement,
+            checksNestedCode: false
+        )
+
+        var helperURL: CFURL?
+        status = SecCodeCopyPath(helperCode, [], &helperURL)
+        guard status == errSecSuccess, let helperURL else {
+            throw PAMHelperBuildIdentityError.cannotReadCode(status)
+        }
+        let executableURL = (helperURL as URL).standardizedFileURL
+        let applicationURL = executableURL
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let expectedExecutableURL = applicationURL.appendingPathComponent(
+            PAMIntegrationConstants.embeddedHelperRelativePath
+        )
+        guard applicationURL.pathExtension == "app",
+              expectedExecutableURL.standardizedFileURL == executableURL else {
+            throw PAMHelperBuildIdentityError.unexpectedHelperLocation
+        }
+
+        let applicationCode = try validatedStaticCode(
+            at: applicationURL,
+            requirement: PAMIntegrationConstants.applicationSigningRequirement,
+            checksNestedCode: true
+        )
+        return Self(
+            applicationCodeDirectoryHash: try codeDirectoryHash(for: applicationCode),
+            helperCodeDirectoryHash: try codeDirectoryHash(for: helperCode)
+        )
+    }
+
+    private static func validatedStaticCode(
+        at url: URL,
+        requirement: String,
+        checksNestedCode: Bool
+    ) throws -> SecStaticCode {
+        var code: SecStaticCode?
+        let status = SecStaticCodeCreateWithPath(url as CFURL, [], &code)
+        guard status == errSecSuccess, let code else {
+            throw PAMHelperBuildIdentityError.cannotReadCode(status)
+        }
+        try validate(code, requirement: requirement, checksNestedCode: checksNestedCode)
+        return code
+    }
+
+    private static func validate(
+        _ code: SecStaticCode,
+        requirement requirementText: String,
+        checksNestedCode: Bool
+    ) throws {
+        var requirement: SecRequirement?
+        var status = SecRequirementCreateWithString(
+            requirementText as CFString,
+            [],
+            &requirement
+        )
+        guard status == errSecSuccess, let requirement else {
+            throw PAMHelperBuildIdentityError.cannotReadCode(status)
+        }
+        var rawFlags = kSecCSStrictValidate | kSecCSRestrictSymlinks
+        if checksNestedCode {
+            rawFlags |= kSecCSCheckNestedCode
+        }
+        status = SecStaticCodeCheckValidity(
+            code,
+            SecCSFlags(rawValue: rawFlags),
+            requirement
+        )
+        guard status == errSecSuccess else {
+            throw PAMHelperBuildIdentityError.invalidSignature(status)
+        }
+    }
+
+    private static func codeDirectoryHash(for code: SecStaticCode) throws -> Data {
+        var information: CFDictionary?
+        let status = SecCodeCopySigningInformation(
+            code,
+            SecCSFlags(rawValue: kSecCSSigningInformation),
+            &information
+        )
+        guard status == errSecSuccess,
+              let dictionary = information as? [String: Any],
+              let hash = dictionary[kSecCodeInfoUnique as String] as? Data else {
+            throw PAMHelperBuildIdentityError.cannotReadCode(status)
+        }
+        return hash
+    }
+
+    private static func encodedToken(applicationHash: Data, helperHash: Data) -> Data {
+        var input = Data("WhoSudod.PAMHelperBuild.v1".utf8)
+        append(applicationHash, to: &input)
+        append(helperHash, to: &input)
+        return Data(SHA256.hash(data: input))
+    }
+
+    private func exactSigningRequirement(
+        base: String,
+        codeDirectoryHash: Data
+    ) throws -> String {
+        guard !codeDirectoryHash.isEmpty else {
+            throw PAMHelperBuildIdentityError.invalidCodeDirectoryHash
+        }
+        let hash = codeDirectoryHash.map { String(format: "%02x", $0) }.joined()
+        let text = "(\(base)) and cdhash H\"\(hash)\""
+        var requirement: SecRequirement?
+        let status = SecRequirementCreateWithString(text as CFString, [], &requirement)
+        guard status == errSecSuccess, requirement != nil else {
+            throw PAMHelperBuildIdentityError.invalidRequirement(status)
+        }
+        return text
+    }
+
+    private static func append(_ value: Data, to token: inout Data) {
+        var length = UInt32(value.count).bigEndian
+        withUnsafeBytes(of: &length) { token.append(contentsOf: $0) }
+        token.append(value)
+    }
+}
+
+enum PAMHelperBuildIdentityError: LocalizedError, Equatable {
+    case cannotReadCode(OSStatus)
+    case invalidSignature(OSStatus)
+    case invalidRequirement(OSStatus)
+    case invalidCodeDirectoryHash
+    case unexpectedHelperLocation
+    case mismatch
+
+    var errorDescription: String? {
+        switch self {
+        case .cannotReadCode(let status):
+            "The PAM helper build identity could not be read (\(status))."
+        case .invalidSignature(let status):
+            "The PAM helper build has an invalid signature (\(status))."
+        case .invalidRequirement(let status):
+            "The exact PAM helper identity requirement is invalid (\(status))."
+        case .invalidCodeDirectoryHash:
+            "The PAM helper build has no CodeDirectory hash."
+        case .unexpectedHelperLocation:
+            "The PAM helper is not inside the current application."
+        case .mismatch:
+            "The registered PAM helper does not match this application build."
+        }
+    }
 }
 
 enum PAMIntegrationStateCode: Int, Sendable {
@@ -24,6 +250,11 @@ enum PAMIntegrationStateCode: Int, Sendable {
     case installed = 1
     case needsRepair = 2
     case unsupported = 3
+    case removalOnly = 4
+}
+
+enum PAMHelperReplyCode {
+    static let transportFailure = -1
 }
 
 struct PAMIntegrationInspection: Equatable, Sendable {
@@ -32,9 +263,18 @@ struct PAMIntegrationInspection: Equatable, Sendable {
 }
 
 @objc protocol PAMInstallerXPCProtocol {
+    func buildIdentity(reply: @escaping (Data?, String?) -> Void)
     func status(reply: @escaping (Int, String?) -> Void)
-    func install(reply: @escaping (Int, String?) -> Void)
-    func uninstall(reply: @escaping (Int, String?) -> Void)
+    func install(
+        authorization: Data,
+        expectedBuildIdentity: Data,
+        reply: @escaping (Int, String?, String?) -> Void
+    )
+    func uninstall(
+        authorization: Data,
+        expectedBuildIdentity: Data,
+        reply: @escaping (Int, String?, String?) -> Void
+    )
 }
 
 enum PAMConfigurationError: LocalizedError, Equatable {
@@ -82,8 +322,12 @@ struct PAMConfigurationEditor {
         terminalReaderExists: Bool,
         terminalReaderMatchesPayload: Bool
     ) -> PAMIntegrationInspection {
+        let bytes = Array(configuration)
+        let hasOwnedArtifacts = moduleExists
+            || terminalReaderExists
+            || hasOwnedPayloadReference(in: configuration)
         do {
-            let analysis = try analyze(Array(configuration))
+            let analysis = try analyze(bytes)
             if analysis.ownedOfferLineIndices.isEmpty,
                analysis.ownedRestoreLineIndices.isEmpty,
                !moduleExists,
@@ -116,8 +360,14 @@ struct PAMConfigurationEditor {
                 )
             )
         } catch {
+            let state: PAMIntegrationStateCode
+            if hasOwnedArtifacts, canSafelyRemoveOwnedArtifacts(from: bytes) {
+                state = .removalOnly
+            } else {
+                state = .unsupported
+            }
             return PAMIntegrationInspection(
-                state: .unsupported,
+                state: state,
                 detail: (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
             )
         }
@@ -144,6 +394,10 @@ struct PAMConfigurationEditor {
         offerInsertion.append(contentsOf: terminator)
         updated.insert(contentsOf: offerInsertion, at: anchor.fullRange.lowerBound)
         return Data(updated)
+    }
+
+    static func hasOwnedPayloadReference(in configuration: Data) -> Bool {
+        containsOwnedConfigurationLine(in: Array(configuration))
     }
 
     static func uninstalling(from configuration: Data) throws -> Data {
@@ -252,6 +506,22 @@ struct PAMConfigurationEditor {
             if tokens.contains(modulePath) {
                 throw PAMConfigurationError.foreignModuleReference
             }
+        }
+    }
+
+    private static func containsOwnedConfigurationLine(in bytes: [UInt8]) -> Bool {
+        lines(in: bytes).contains { line in
+            let content = Array(bytes[line.contentRange])
+            return content == ownedOfferLineBytes || content == ownedRestoreLineBytes
+        }
+    }
+
+    private static func canSafelyRemoveOwnedArtifacts(from bytes: [UInt8]) -> Bool {
+        do {
+            try validateForRemoval(bytes)
+            return true
+        } catch {
+            return false
         }
     }
 

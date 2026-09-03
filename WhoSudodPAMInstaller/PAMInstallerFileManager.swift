@@ -5,38 +5,46 @@ import MachO
 import Security
 
 enum PAMInstallerFileError: LocalizedError {
-    case installerIsNotRoot
+    case helperIsNotRoot
     case unsupportedArchitecture
     case unsafeFile(String)
     case missingPayload
     case invalidPayloadSignature(OSStatus)
     case invalidApplicationSignature(OSStatus)
-    case runningInstallerMismatch
+    case invalidHelperSignature(OSStatus)
+    case runningHelperMismatch
     case concurrentModification(String)
     case posix(operation: String, code: Int32)
 
     var errorDescription: String? {
         switch self {
-        case .installerIsNotRoot:
-            "The PAM installer is not running as root."
+        case .helperIsNotRoot:
+            "The PAM helper is not running as root."
         case .unsupportedArchitecture:
-            "This PAM installer supports Apple silicon only."
+            "This PAM helper supports Apple silicon only."
         case .unsafeFile(let path):
-            "The installer refused an unsafe file at \(path)."
+            "The PAM helper refused an unsafe file at \(path)."
         case .missingPayload:
             "A bundled PAM component is missing."
         case .invalidPayloadSignature(let status):
             "A bundled PAM component failed code-signature validation (\(status))."
         case .invalidApplicationSignature(let status):
             "The Who Sudo'd application failed code-signature validation (\(status))."
-        case .runningInstallerMismatch:
-            "The running PAM installer does not match the signed application on disk."
+        case .invalidHelperSignature(let status):
+            "The PAM helper failed code-signature validation (\(status))."
+        case .runningHelperMismatch:
+            "The running PAM helper does not match the signed application on disk."
         case .concurrentModification(let path):
-            "The installer stopped because \(path) changed during the operation. Try again."
+            "The PAM helper stopped because \(path) changed during the operation. Try again."
         case .posix(let operation, let code):
             "\(operation) failed: \(String(cString: strerror(code)))."
         }
     }
+}
+
+struct PAMInstallerMutationResult {
+    let inspection: PAMIntegrationInspection
+    let operationError: String?
 }
 
 final class PAMInstallerFileManager {
@@ -76,6 +84,10 @@ final class PAMInstallerFileManager {
         let version: FileVersion
     }
 
+    private struct PayloadActivation {
+        let previousDirectoryPath: String?
+    }
+
     private final class OpenPayload {
         let path: String
         let descriptor: Int32
@@ -92,10 +104,126 @@ final class PAMInstallerFileManager {
         }
     }
 
+    private struct InstallTransactionOperations: PAMInstallTransactionOperations {
+        unowned let files: PAMInstallerFileManager
+        let module: OpenPayload
+        let terminalReader: OpenPayload
+        let applicationURL: URL
+        let initialConfiguration: FileSnapshot
+        let activatedConfiguration: Data
+        let configurationInitiallyReferencesPayloads: Bool
+
+        func activateCompletePayloadSet() throws -> PayloadActivation {
+            try files.replacePayloadSetAtomically(
+                module: module,
+                terminalReader: terminalReader
+            )
+        }
+
+        func validateActivatedPayloadSet() throws {
+            try files.requireManagedPayloadDirectory(
+                at: files.installationDirectoryPath,
+                requiresBothPayloads: true
+            )
+            try files.validateApplicationBundleForInstall(expectedURL: applicationURL)
+            try files.requireUnchangedPayload(module)
+            try files.requireUnchangedPayload(terminalReader)
+        }
+
+        func persistActivatedPayloadSet() throws {
+            try files.persistenceBarrier(
+                path: (files.installationDirectoryPath as NSString).deletingLastPathComponent
+            )
+        }
+
+        func validateConfigurationBeforeCommit() throws {
+            try files.managedConfigurationGuard.requireLocalConfiguration()
+        }
+
+        func commitConfigurationReferencingPayloads() throws {
+            guard activatedConfiguration != initialConfiguration.data else {
+                return
+            }
+            try files.atomicReplaceConfiguration(
+                with: activatedConfiguration,
+                replacing: initialConfiguration
+            )
+        }
+
+        func discardPreviousPayloadSet(after activation: PayloadActivation) {
+            files.commitPayloadActivation(activation)
+        }
+
+        func recoverFromPrecommitFailure(
+            after activation: PayloadActivation,
+            activationWasPersisted: Bool
+        ) {
+            if configurationInitiallyReferencesPayloads {
+                // The old configuration already calls this fixed payload path.
+                // Keep the newly published complete set instead of restoring a
+                // previous set that may be the reason repair was required.
+                // Before the activation barrier succeeds, also retain the old
+                // directory because a restart can restore its name mapping.
+                if activationWasPersisted {
+                    files.commitPayloadActivation(activation)
+                }
+            } else {
+                try? files.rollbackPayloadActivation(activation)
+            }
+        }
+    }
+
+    private struct UninstallTransactionOperations: PAMUninstallTransactionOperations {
+        unowned let files: PAMInstallerFileManager
+        let initialConfiguration: FileSnapshot
+        let updatedConfiguration: Data
+
+        func commitConfigurationWithoutPayloadReferences() throws {
+            guard updatedConfiguration != initialConfiguration.data else {
+                return
+            }
+            try files.atomicReplaceConfiguration(
+                with: updatedConfiguration,
+                replacing: initialConfiguration
+            )
+        }
+
+        func persistConfigurationWithoutPayloadReferences() throws {
+            try files.persistenceBarrier(
+                path: (files.configurationPath as NSString).deletingLastPathComponent
+            )
+        }
+
+        func validatePayloadRemoval() throws {
+            try files.managedConfigurationGuard.requireLocalConfiguration()
+            let currentConfiguration = try files.secureFileSnapshot(
+                path: files.configurationPath
+            )
+            guard currentConfiguration.data == updatedConfiguration,
+                  !PAMConfigurationEditor.hasOwnedPayloadReference(
+                    in: currentConfiguration.data
+                  ) else {
+                throw PAMInstallerFileError.concurrentModification(
+                    files.configurationPath
+                )
+            }
+        }
+
+        func removePayloadSet() throws {
+            try files.removeInstalledPayloads()
+        }
+    }
+
     private let configurationPath = PAMIntegrationConstants.sudoConfigurationPath
     private let installationDirectoryPath = PAMIntegrationConstants.installationDirectoryPath
     private let installedModulePath = PAMIntegrationConstants.installedModulePath
     private let installedTerminalReaderPath = PAMIntegrationConstants.installedTerminalReaderPath
+    private let operationLockDirectoryPath = "/Library/Security"
+    private let managedConfigurationGuard: PAMManagedConfigurationGuard
+
+    init(managedConfigurationGuard: PAMManagedConfigurationGuard = .system) {
+        self.managedConfigurationGuard = managedConfigurationGuard
+    }
 
     func inspect() -> PAMIntegrationInspection {
         do {
@@ -148,109 +276,163 @@ final class PAMInstallerFileManager {
         }
     }
 
-    func install() -> PAMIntegrationInspection {
+    func install(expectedBuildIdentity: Data) -> PAMInstallerMutationResult {
         do {
             try validateRuntime()
-            let modulePayloadURL = try embeddedPayloadURL(
-                relativePath: PAMIntegrationConstants.embeddedModuleRelativePath
-            )
-            let terminalReaderPayloadURL = try embeddedPayloadURL(
-                relativePath: PAMIntegrationConstants.embeddedTerminalReaderRelativePath
-            )
-            let modulePayload = try openPayload(at: modulePayloadURL.path)
-            let terminalReaderPayload = try openPayload(at: terminalReaderPayloadURL.path)
-            let applicationURL = try validateApplicationBundleForInstall()
-            try requireUnchangedPayload(modulePayload)
-            try requireUnchangedPayload(terminalReaderPayload)
-            try validatePayloadSignature(
-                at: modulePayloadURL,
-                requirement: PAMIntegrationConstants.moduleSigningRequirement
-            )
-            try validatePayloadSignature(
-                at: terminalReaderPayloadURL,
-                requirement: PAMIntegrationConstants.terminalReaderSigningRequirement
-            )
+            let inspection = try withExclusiveOperationLock {
+                try managedConfigurationGuard.requireLocalConfiguration()
+                let modulePayloadURL = try embeddedPayloadURL(
+                    relativePath: PAMIntegrationConstants.embeddedModuleRelativePath
+                )
+                let terminalReaderPayloadURL = try embeddedPayloadURL(
+                    relativePath: PAMIntegrationConstants.embeddedTerminalReaderRelativePath
+                )
+                let modulePayload = try openPayload(at: modulePayloadURL.path)
+                let terminalReaderPayload = try openPayload(at: terminalReaderPayloadURL.path)
+                try requireExpectedBuildIdentity(expectedBuildIdentity)
+                let applicationURL = try validateApplicationBundleForInstall()
+                try requireUnchangedPayload(modulePayload)
+                try requireUnchangedPayload(terminalReaderPayload)
+                try validatePayloadSignature(
+                    at: modulePayloadURL,
+                    requirement: PAMIntegrationConstants.moduleSigningRequirement
+                )
+                try validatePayloadSignature(
+                    at: terminalReaderPayloadURL,
+                    requirement: PAMIntegrationConstants.terminalReaderSigningRequirement
+                )
 
-            let initialConfiguration = try secureFileSnapshot(path: configurationPath)
-            let deactivatedConfiguration = try PAMConfigurationEditor.uninstalling(
-                from: initialConfiguration.data
-            )
-            if deactivatedConfiguration != initialConfiguration.data {
-                try atomicReplaceConfiguration(
-                    with: deactivatedConfiguration,
-                    replacing: initialConfiguration
+                let initialConfiguration = try secureFileSnapshot(path: configurationPath)
+                let activatedConfiguration = try PAMConfigurationEditor.installing(
+                    in: initialConfiguration.data
                 )
+                try PAMInstallTransactionCoordinator(
+                    operations: InstallTransactionOperations(
+                        files: self,
+                        module: modulePayload,
+                        terminalReader: terminalReaderPayload,
+                        applicationURL: applicationURL,
+                        initialConfiguration: initialConfiguration,
+                        activatedConfiguration: activatedConfiguration,
+                        configurationInitiallyReferencesPayloads:
+                            PAMConfigurationEditor.hasOwnedPayloadReference(
+                                in: initialConfiguration.data
+                            )
+                    )
+                ).run()
+                return inspect()
             }
-            try ensureInstallationDirectory()
-            try installPayload(
-                from: modulePayload,
-                to: installedModulePath,
-                temporaryName: ".pam_whosudod.so.XXXXXX",
-                requirement: PAMIntegrationConstants.moduleSigningRequirement,
-                componentName: "PAM module"
+            return PAMInstallerMutationResult(
+                inspection: inspection,
+                operationError: inspection.state == .installed
+                    ? nil
+                    : inspection.detail ?? "The PAM installation could not be verified."
             )
-            try installPayload(
-                from: terminalReaderPayload,
-                to: installedTerminalReaderPath,
-                temporaryName: ".whosudod-pam-terminal-reader.XXXXXX",
-                requirement: PAMIntegrationConstants.terminalReaderSigningRequirement,
-                componentName: "terminal password reader"
-            )
-            try validateApplicationBundleForInstall(expectedURL: applicationURL)
-            try requireUnchangedPayload(modulePayload)
-            try requireUnchangedPayload(terminalReaderPayload)
-            let currentConfiguration = try secureFileSnapshot(path: configurationPath)
-            let activatedConfiguration = try PAMConfigurationEditor.installing(
-                in: currentConfiguration.data
-            )
-            if activatedConfiguration != currentConfiguration.data {
-                try atomicReplaceConfiguration(
-                    with: activatedConfiguration,
-                    replacing: currentConfiguration
-                )
-            }
-            return inspect()
         } catch {
-            return PAMIntegrationInspection(
-                state: .unsupported,
-                detail: (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+            return PAMInstallerMutationResult(
+                inspection: inspect(),
+                operationError: (error as? LocalizedError)?.errorDescription
+                    ?? error.localizedDescription
             )
         }
     }
 
-    func uninstall() -> PAMIntegrationInspection {
+    func uninstall(expectedBuildIdentity: Data) -> PAMInstallerMutationResult {
         do {
             try validateRuntime()
-            let configuration = try secureFileSnapshot(path: configurationPath)
-            let updatedConfiguration = try PAMConfigurationEditor.uninstalling(
-                from: configuration.data
-            )
-            if updatedConfiguration != configuration.data {
-                try atomicReplaceConfiguration(
-                    with: updatedConfiguration,
-                    replacing: configuration
+            let inspection = try withExclusiveOperationLock {
+                try managedConfigurationGuard.requireLocalConfiguration()
+                try requireExpectedBuildIdentity(expectedBuildIdentity)
+                let configuration = try secureFileSnapshot(path: configurationPath)
+                let updatedConfiguration = try PAMConfigurationEditor.uninstalling(
+                    from: configuration.data
                 )
+                try managedConfigurationGuard.requireLocalConfiguration()
+                try PAMUninstallTransactionCoordinator(
+                    operations: UninstallTransactionOperations(
+                        files: self,
+                        initialConfiguration: configuration,
+                        updatedConfiguration: updatedConfiguration
+                    )
+                ).run()
+                return PAMIntegrationInspection(state: .notInstalled, detail: nil)
             }
-            try removeInstalledPayloads()
-            return PAMIntegrationInspection(state: .notInstalled, detail: nil)
-        } catch {
-            return PAMIntegrationInspection(
-                state: .unsupported,
-                detail: (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+            return PAMInstallerMutationResult(
+                inspection: inspection,
+                operationError: inspection.state == .notInstalled
+                    ? nil
+                    : inspection.detail ?? "The PAM removal could not be verified."
             )
+        } catch {
+            return PAMInstallerMutationResult(
+                inspection: inspect(),
+                operationError: (error as? LocalizedError)?.errorDescription
+                    ?? error.localizedDescription
+            )
+        }
+    }
+
+    private func requireExpectedBuildIdentity(_ expectedBuildIdentity: Data) throws {
+        guard try PAMHelperBuildIdentity.currentHelper().matches(
+            token: expectedBuildIdentity
+        ) else {
+            throw PAMHelperBuildIdentityError.mismatch
         }
     }
 
     private func validateRuntime() throws {
         guard geteuid() == 0 else {
-            throw PAMInstallerFileError.installerIsNotRoot
+            throw PAMInstallerFileError.helperIsNotRoot
         }
         #if !arch(arm64)
         throw PAMInstallerFileError.unsupportedArchitecture
         #endif
+        try managedConfigurationGuard.requireLocalConfiguration()
+        try validateRunningHelperSignature()
         try requireSafeDirectory(path: "/etc/pam.d", exactMode: 0o755)
         try requireSafeDirectory(path: "/Library", exactMode: 0o755)
         try requireSafeDirectory(path: "/Library/Security", exactMode: 0o755)
+    }
+
+    private func withExclusiveOperationLock<Result>(
+        _ operation: () throws -> Result
+    ) throws -> Result {
+        let descriptor = open(
+            operationLockDirectoryPath,
+            O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_DIRECTORY
+        )
+        guard descriptor >= 0 else {
+            throw posixError("Open the PAM operation lock")
+        }
+        defer { close(descriptor) }
+
+        var descriptorMetadata = stat()
+        guard fstat(descriptor, &descriptorMetadata) == 0 else {
+            throw posixError("Inspect the PAM operation lock")
+        }
+        guard descriptorMetadata.st_mode & S_IFMT == S_IFDIR,
+              descriptorMetadata.st_uid == 0,
+              descriptorMetadata.st_gid == 0,
+              descriptorMetadata.st_mode & mode_t(0o7777) == mode_t(0o755) else {
+            throw PAMInstallerFileError.unsafeFile(operationLockDirectoryPath)
+        }
+        try requireNoExtendedACL(fd: descriptor, path: operationLockDirectoryPath)
+
+        while flock(descriptor, LOCK_EX) != 0 {
+            guard errno == EINTR else {
+                throw posixError("Lock the PAM operation")
+            }
+        }
+        defer { _ = flock(descriptor, LOCK_UN) }
+
+        var pathMetadata = stat()
+        guard lstat(operationLockDirectoryPath, &pathMetadata) == 0,
+              pathMetadata.st_mode & S_IFMT == S_IFDIR,
+              pathMetadata.st_dev == descriptorMetadata.st_dev,
+              pathMetadata.st_ino == descriptorMetadata.st_ino else {
+            throw PAMInstallerFileError.unsafeFile(operationLockDirectoryPath)
+        }
+        return try operation()
     }
 
     private func embeddedPayloadURL(relativePath: String) throws -> URL {
@@ -261,12 +443,44 @@ final class PAMInstallerFileManager {
         return payloadURL
     }
 
+    private func validateRunningHelperSignature() throws {
+        var runningCode: SecCode?
+        var status = SecCodeCopySelf([], &runningCode)
+        guard status == errSecSuccess, let runningCode else {
+            throw PAMInstallerFileError.invalidHelperSignature(status)
+        }
+        var runningStaticCode: SecStaticCode?
+        status = SecCodeCopyStaticCode(runningCode, [], &runningStaticCode)
+        guard status == errSecSuccess, let runningStaticCode else {
+            throw PAMInstallerFileError.invalidHelperSignature(status)
+        }
+
+        var helperRequirement: SecRequirement?
+        status = SecRequirementCreateWithString(
+            PAMIntegrationConstants.helperSigningRequirement as CFString,
+            [],
+            &helperRequirement
+        )
+        guard status == errSecSuccess, let helperRequirement else {
+            throw PAMInstallerFileError.invalidHelperSignature(status)
+        }
+
+        status = SecStaticCodeCheckValidity(
+            runningStaticCode,
+            SecCSFlags(rawValue: kSecCSStrictValidate),
+            helperRequirement
+        )
+        guard status == errSecSuccess else {
+            throw PAMInstallerFileError.invalidHelperSignature(status)
+        }
+    }
+
     @discardableResult
     private func validateApplicationBundleForInstall(expectedURL: URL? = nil) throws -> URL {
         let applicationURL = try applicationBundleURL()
         if let expectedURL,
            applicationURL.standardizedFileURL != expectedURL.standardizedFileURL {
-            throw PAMInstallerFileError.runningInstallerMismatch
+            throw PAMInstallerFileError.runningHelperMismatch
         }
 
         var applicationCode: SecStaticCode?
@@ -310,17 +524,17 @@ final class PAMInstallerFileManager {
         guard status == errSecSuccess, let runningStaticCode else {
             throw PAMInstallerFileError.invalidApplicationSignature(status)
         }
-        let installerURL = applicationURL.appendingPathComponent(
+        let helperURL = applicationURL.appendingPathComponent(
             "Contents/Library/LaunchServices/WhoSudodPAMInstaller"
         )
-        var installerCode: SecStaticCode?
-        status = SecStaticCodeCreateWithPath(installerURL as CFURL, [], &installerCode)
-        guard status == errSecSuccess, let installerCode else {
+        var helperCode: SecStaticCode?
+        status = SecStaticCodeCreateWithPath(helperURL as CFURL, [], &helperCode)
+        guard status == errSecSuccess, let helperCode else {
             throw PAMInstallerFileError.invalidApplicationSignature(status)
         }
         guard try codeDirectoryHash(for: runningStaticCode)
-            == codeDirectoryHash(for: installerCode) else {
-            throw PAMInstallerFileError.runningInstallerMismatch
+            == codeDirectoryHash(for: helperCode) else {
+            throw PAMInstallerFileError.runningHelperMismatch
         }
         return applicationURL
     }
@@ -396,20 +610,138 @@ final class PAMInstallerFileManager {
         }
     }
 
+    private func replacePayloadSetAtomically(
+        module: OpenPayload,
+        terminalReader: OpenPayload
+    ) throws -> PayloadActivation {
+        let parentDirectoryPath = (installationDirectoryPath as NSString)
+            .deletingLastPathComponent
+        try requireSafeDirectory(path: parentDirectoryPath, exactMode: 0o755)
+
+        var stagingTemplate = Array(
+            (parentDirectoryPath + "/.WhoSudod.stage.XXXXXX").utf8CString
+        )
+        guard mkdtemp(&stagingTemplate) != nil else {
+            throw posixError("Create the staged PAM component directory")
+        }
+        let stagingDirectoryPath = String(
+            decoding: stagingTemplate.prefix { $0 != 0 }.map(UInt8.init(bitPattern:)),
+            as: UTF8.self
+        )
+        var shouldRemoveStagingDirectory = true
+        defer {
+            if shouldRemoveStagingDirectory {
+                try? removeManagedPayloadDirectory(at: stagingDirectoryPath)
+            }
+        }
+
+        guard chown(stagingDirectoryPath, 0, 0) == 0 else {
+            throw posixError("Set staged PAM component directory ownership")
+        }
+        try installPayload(
+            from: module,
+            in: stagingDirectoryPath,
+            fileName: (installedModulePath as NSString).lastPathComponent,
+            temporaryName: ".pam_whosudod.so.XXXXXX",
+            requirement: PAMIntegrationConstants.moduleSigningRequirement,
+            componentName: "PAM module"
+        )
+        try installPayload(
+            from: terminalReader,
+            in: stagingDirectoryPath,
+            fileName: (installedTerminalReaderPath as NSString).lastPathComponent,
+            temporaryName: ".whosudod-pam-terminal-reader.XXXXXX",
+            requirement: PAMIntegrationConstants.terminalReaderSigningRequirement,
+            componentName: "terminal password reader"
+        )
+        guard chmod(stagingDirectoryPath, mode_t(0o755)) == 0 else {
+            throw posixError("Set staged PAM component directory permissions")
+        }
+        try requireManagedPayloadDirectory(at: stagingDirectoryPath, requiresBothPayloads: true)
+        try syncDirectory(path: stagingDirectoryPath)
+
+        let activation: PayloadActivation
+        var installedMetadata = stat()
+        if lstat(installationDirectoryPath, &installedMetadata) == 0 {
+            try requireManagedPayloadDirectory(
+                at: installationDirectoryPath,
+                requiresBothPayloads: false
+            )
+            guard renamex_np(
+                stagingDirectoryPath,
+                installationDirectoryPath,
+                UInt32(RENAME_SWAP)
+            ) == 0 else {
+                throw posixError("Activate the PAM component set")
+            }
+            shouldRemoveStagingDirectory = false
+            activation = PayloadActivation(previousDirectoryPath: stagingDirectoryPath)
+        } else {
+            guard errno == ENOENT else {
+                throw posixError("Inspect the PAM component directory")
+            }
+            guard rename(stagingDirectoryPath, installationDirectoryPath) == 0 else {
+                throw posixError("Activate the PAM component set")
+            }
+            shouldRemoveStagingDirectory = false
+            activation = PayloadActivation(previousDirectoryPath: nil)
+        }
+        return activation
+    }
+
+    private func commitPayloadActivation(_ activation: PayloadActivation) {
+        guard let previousDirectoryPath = activation.previousDirectoryPath else {
+            return
+        }
+        try? removeManagedPayloadDirectory(at: previousDirectoryPath)
+    }
+
+    private func rollbackPayloadActivation(_ activation: PayloadActivation) throws {
+        let parentDirectoryPath = (installationDirectoryPath as NSString)
+            .deletingLastPathComponent
+        guard let previousDirectoryPath = activation.previousDirectoryPath else {
+            try removeManagedPayloadDirectory(at: installationDirectoryPath)
+            return
+        }
+
+        try requireManagedPayloadDirectory(
+            at: installationDirectoryPath,
+            requiresBothPayloads: true
+        )
+        try requireManagedPayloadDirectory(
+            at: previousDirectoryPath,
+            requiresBothPayloads: false
+        )
+        guard renamex_np(
+            previousDirectoryPath,
+            installationDirectoryPath,
+            UInt32(RENAME_SWAP)
+        ) == 0 else {
+            throw posixError("Restore the previous PAM component set")
+        }
+        try syncDirectory(path: parentDirectoryPath)
+
+        // The active path is restored. Failure to remove the inactive new set
+        // cannot leave sudo with a missing module.
+        try? removeManagedPayloadDirectory(at: previousDirectoryPath)
+    }
+
     private func installPayload(
         from source: OpenPayload,
-        to destinationPath: String,
+        in directoryPath: String,
+        fileName: String,
         temporaryName: String,
         requirement: String,
         componentName: String
     ) throws {
+        let destinationPath = directoryPath + "/" + fileName
         try requireUnchangedPayload(source)
         guard lseek(source.descriptor, 0, SEEK_SET) == 0 else {
             throw posixError("Read the bundled \(componentName)")
         }
 
         try rejectSymlinkIfPresent(path: destinationPath)
-        let template = installationDirectoryPath + "/" + temporaryName
+        let template = directoryPath + "/" + temporaryName
         var templateBytes = Array(template.utf8CString)
         let temporaryFD = mkstemp(&templateBytes)
         guard temporaryFD >= 0 else { throw posixError("Create the temporary \(componentName)") }
@@ -450,7 +782,7 @@ final class PAMInstallerFileManager {
             throw posixError("Activate the \(componentName)")
         }
         keepTemporaryFile = false
-        try syncDirectory(path: installationDirectoryPath)
+        try syncDirectory(path: directoryPath)
     }
 
     private func openPayload(at path: String) throws -> OpenPayload {
@@ -546,26 +878,9 @@ final class PAMInstallerFileManager {
             throw posixError("Activate the sudo PAM configuration")
         }
         keepTemporaryFile = false
-        try syncDirectory(path: directoryPath)
-    }
-
-    private func ensureInstallationDirectory() throws {
-        try requireSafeDirectory(path: "/Library/Security")
-        var metadata = stat()
-        if lstat(installationDirectoryPath, &metadata) != 0 {
-            guard errno == ENOENT else { throw posixError("Inspect the PAM installation directory") }
-            guard mkdir(installationDirectoryPath, mode_t(0o755)) == 0 else {
-                throw posixError("Create the PAM installation directory")
-            }
-            guard chown(installationDirectoryPath, 0, 0) == 0 else {
-                throw posixError("Set PAM installation directory ownership")
-            }
-        }
-        try requireSafeDirectory(path: installationDirectoryPath)
-        guard chmod(installationDirectoryPath, mode_t(0o755)) == 0 else {
-            throw posixError("Set PAM installation directory permissions")
-        }
-        try requireSafeDirectory(path: installationDirectoryPath, exactMode: 0o755)
+        // The atomic rename is the commit point. A later durability error must
+        // not make the caller roll back payloads that the active PAM file uses.
+        try? syncDirectory(path: directoryPath)
     }
 
     private func requireSafeDirectory(path: String, exactMode: mode_t? = nil) throws {
@@ -628,20 +943,50 @@ final class PAMInstallerFileManager {
     }
 
     private func removeInstalledPayloads() throws {
+        try removeManagedPayloadDirectory(at: installationDirectoryPath)
+    }
+
+    private func requireManagedPayloadDirectory(
+        at directoryPath: String,
+        requiresBothPayloads: Bool
+    ) throws {
+        try requireSafeDirectory(path: directoryPath)
+        let moduleName = (installedModulePath as NSString).lastPathComponent
+        let terminalReaderName = (installedTerminalReaderPath as NSString).lastPathComponent
+        let allowedNames = Set([moduleName, terminalReaderName])
+        let names = try FileManager.default.contentsOfDirectory(atPath: directoryPath)
+        let nameSet = Set(names)
+        guard nameSet.isSubset(of: allowedNames),
+              !requiresBothPayloads || nameSet == allowedNames else {
+            throw PAMInstallerFileError.unsafeFile(directoryPath)
+        }
+
+        for name in names {
+            try requireRemovableInstalledPayload(at: directoryPath + "/" + name)
+        }
+    }
+
+    private func removeManagedPayloadDirectory(at directoryPath: String) throws {
         var directoryMetadata = stat()
-        if lstat(installationDirectoryPath, &directoryMetadata) != 0 {
+        if lstat(directoryPath, &directoryMetadata) != 0 {
             guard errno == ENOENT else {
                 throw posixError("Inspect the PAM installation directory")
             }
             return
         }
-        try requireSafeDirectory(path: installationDirectoryPath)
-        try removeInstalledPayload(at: installedTerminalReaderPath)
-        try removeInstalledPayload(at: installedModulePath)
-        try syncDirectory(path: installationDirectoryPath)
-        if rmdir(installationDirectoryPath) != 0, errno != ENOTEMPTY {
+        try requireManagedPayloadDirectory(at: directoryPath, requiresBothPayloads: false)
+        try removeInstalledPayload(
+            at: directoryPath + "/"
+                + (installedTerminalReaderPath as NSString).lastPathComponent
+        )
+        try removeInstalledPayload(
+            at: directoryPath + "/" + (installedModulePath as NSString).lastPathComponent
+        )
+        try syncDirectory(path: directoryPath)
+        if rmdir(directoryPath) != 0, errno != ENOTEMPTY {
             throw posixError("Remove the PAM installation directory")
         }
+        try syncDirectory(path: (directoryPath as NSString).deletingLastPathComponent)
     }
 
     private func removeInstalledPayload(at path: String) throws {
@@ -650,6 +995,24 @@ final class PAMInstallerFileManager {
             guard errno == ENOENT else { throw posixError("Inspect the installed PAM component") }
             return
         }
+        try requireRemovableInstalledPayload(at: path, metadata: metadata)
+        guard unlink(path) == 0 else {
+            throw posixError("Remove the installed PAM component")
+        }
+    }
+
+    private func requireRemovableInstalledPayload(at path: String) throws {
+        var metadata = stat()
+        guard lstat(path, &metadata) == 0 else {
+            throw posixError("Inspect the installed PAM component")
+        }
+        try requireRemovableInstalledPayload(at: path, metadata: metadata)
+    }
+
+    private func requireRemovableInstalledPayload(
+        at path: String,
+        metadata: stat
+    ) throws {
         guard metadata.st_mode & S_IFMT == S_IFREG else {
             throw PAMInstallerFileError.unsafeFile(path)
         }
@@ -660,9 +1023,6 @@ final class PAMInstallerFileManager {
             throw PAMInstallerFileError.unsafeFile(path)
         }
         try requireNoExtendedACL(path: path)
-        guard unlink(path) == 0 else {
-            throw posixError("Remove the installed PAM component")
-        }
     }
 
     private func secureRead(path: String) throws -> Data {
@@ -837,6 +1197,15 @@ final class PAMInstallerFileManager {
         guard fd >= 0 else { throw posixError("Open \(path)") }
         defer { close(fd) }
         guard fsync(fd) == 0 else { throw posixError("Sync \(path)") }
+    }
+
+    private func persistenceBarrier(path: String) throws {
+        let fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW)
+        guard fd >= 0 else { throw posixError("Open \(path)") }
+        defer { close(fd) }
+        guard fcntl(fd, F_BARRIERFSYNC) == 0 else {
+            throw posixError("Order persistent changes for \(path)")
+        }
     }
 
     private func posixError(_ operation: String) -> PAMInstallerFileError {

@@ -45,6 +45,7 @@ targets:
         INFOPLIST_KEY_CFBundleShortVersionString: "$(MARKETING_VERSION)"
         INFOPLIST_KEY_CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
         INFOPLIST_KEY_LSUIElement: YES
+        INFOPLIST_KEY_NSSystemAdministrationUsageDescription: "Who Sudo'd installs or removes its optional sudo password input."
         GENERATE_INFOPLIST_FILE: YES
     dependencies:
       - package: Permiso
@@ -78,12 +79,17 @@ targets:
     platform: macOS
     sources:
       - path: WhoSudodTests
+      - path: WhoSudodPAMInstaller/PAMManagedConfigurationGuard.swift
+      - path: WhoSudodPAMInstaller/PAMMutationTransaction.swift
+      - path: WhoSudodPAMInstaller/PAMOperationAuthorization.swift
+      - path: WhoSudodPAMInstaller/PAMInstallerMutationAuthorizationGate.swift
     dependencies:
       - target: WhoSudod
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.zats.WhoSudodTests
         GENERATE_INFOPLIST_FILE: YES
+        SWIFT_ACTIVE_COMPILATION_CONDITIONS: "$(inherited) PAM_HELPER_UNIT_TESTS"
 
   WhoSudodLiveRequester:
     type: application
@@ -107,6 +113,7 @@ targets:
       - path: WhoSudodPAMInstaller
         excludes:
           - "*.plist"
+          - "WhoSudodPAMInstaller-Bridging-Header.h"
       - path: WhoSudod/PAMIntegrationProtocol.swift
     settings:
       base:
@@ -115,6 +122,10 @@ targets:
         GENERATE_INFOPLIST_FILE: YES
         CREATE_INFOPLIST_SECTION_IN_BINARY: YES
         CODE_SIGN_INJECT_BASE_ENTITLEMENTS: NO
+        INFOPLIST_KEY_NSSystemAdministrationUsageDescription: "Who Sudo'd installs or removes its optional sudo password input."
+        SWIFT_OBJC_BRIDGING_HEADER: "$(SRCROOT)/WhoSudodPAMInstaller/WhoSudodPAMInstaller-Bridging-Header.h"
+    dependencies:
+      - sdk: libManagedConfigurationFiles.tbd
 
   WhoSudodPAM:
     type: library.dynamic

@@ -65,6 +65,7 @@ final class PAMInstallerLifecycle: @unchecked Sendable {
 
 final class PAMInstallerService: NSObject, PAMInstallerXPCProtocol {
     private let files = PAMInstallerFileManager()
+    private let mutationAuthorizationGate = PAMInstallerMutationAuthorizationGate()
     private let lock = NSLock()
     private let lifecycle: PAMInstallerLifecycle
 
@@ -72,19 +73,51 @@ final class PAMInstallerService: NSObject, PAMInstallerXPCProtocol {
         self.lifecycle = lifecycle
     }
 
+    func buildIdentity(reply: @escaping (Data?, String?) -> Void) {
+        lifecycle.beginOperation()
+        do {
+            let identity = try PAMHelperBuildIdentity.currentHelper()
+            reply(identity.token, nil)
+        } catch {
+            reply(
+                nil,
+                (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+            )
+        }
+        lifecycle.endOperation()
+    }
+
     func status(reply: @escaping (Int, String?) -> Void) {
-        perform({ files.inspect() }, reply: reply)
+        performWithoutAuthorization({ files.inspect() }, reply: reply)
     }
 
-    func install(reply: @escaping (Int, String?) -> Void) {
-        perform({ files.install() }, reply: reply)
+    func install(
+        authorization: Data,
+        expectedBuildIdentity: Data,
+        reply: @escaping (Int, String?, String?) -> Void
+    ) {
+        perform(
+            authorization: authorization,
+            expectedBuildIdentity: expectedBuildIdentity,
+            operation: { files.install(expectedBuildIdentity: expectedBuildIdentity) },
+            reply: reply
+        )
     }
 
-    func uninstall(reply: @escaping (Int, String?) -> Void) {
-        perform({ files.uninstall() }, reply: reply)
+    func uninstall(
+        authorization: Data,
+        expectedBuildIdentity: Data,
+        reply: @escaping (Int, String?, String?) -> Void
+    ) {
+        perform(
+            authorization: authorization,
+            expectedBuildIdentity: expectedBuildIdentity,
+            operation: { files.uninstall(expectedBuildIdentity: expectedBuildIdentity) },
+            reply: reply
+        )
     }
 
-    private func perform(
+    private func performWithoutAuthorization(
         _ operation: () -> PAMIntegrationInspection,
         reply: @escaping (Int, String?) -> Void
     ) {
@@ -94,6 +127,35 @@ final class PAMInstallerService: NSObject, PAMInstallerXPCProtocol {
         lifecycle.endOperation()
     }
 
+    private func perform(
+        authorization: Data,
+        expectedBuildIdentity: Data,
+        operation: () -> PAMInstallerMutationResult,
+        reply: @escaping (Int, String?, String?) -> Void
+    ) {
+        lifecycle.beginOperation()
+        let result = lock.withLock {
+            do {
+                return try mutationAuthorizationGate.perform(
+                    authorization: authorization,
+                    expectedBuildIdentity: expectedBuildIdentity,
+                    operation: operation
+                )
+            } catch {
+                return PAMInstallerMutationResult(
+                    inspection: files.inspect(),
+                    operationError: (error as? LocalizedError)?.errorDescription
+                        ?? error.localizedDescription
+                )
+            }
+        }
+        reply(
+            result.inspection.state.rawValue,
+            result.inspection.detail,
+            result.operationError
+        )
+        lifecycle.endOperation()
+    }
 }
 
 final class PAMInstallerListenerDelegate: NSObject, NSXPCListenerDelegate {
@@ -104,10 +166,14 @@ final class PAMInstallerListenerDelegate: NSObject, NSXPCListenerDelegate {
         _ listener: NSXPCListener,
         shouldAcceptNewConnection connection: NSXPCConnection
     ) -> Bool {
-        guard connection.processIdentifier > 0 else { return false }
+        guard connection.processIdentifier > 0 else {
+            return false
+        }
         lifecycle.add(connection)
         let finish = { [weak lifecycle, weak connection] in
-            guard let connection else { return }
+            guard let connection else {
+                return
+            }
             lifecycle?.remove(connection)
         }
         connection.interruptionHandler = finish
@@ -121,7 +187,14 @@ final class PAMInstallerListenerDelegate: NSObject, NSXPCListenerDelegate {
 
 let delegate = PAMInstallerListenerDelegate()
 let listener = NSXPCListener(machServiceName: PAMIntegrationConstants.machServiceName)
-listener.setConnectionCodeSigningRequirement(PAMIntegrationConstants.applicationSigningRequirement)
+let applicationSigningRequirement: String
+do {
+    applicationSigningRequirement = try PAMHelperBuildIdentity.currentHelper()
+        .exactApplicationSigningRequirement()
+} catch {
+    exit(EXIT_FAILURE)
+}
+listener.setConnectionCodeSigningRequirement(applicationSigningRequirement)
 listener.delegate = delegate
 listener.activate()
 dispatchMain()

@@ -6,6 +6,29 @@ final class PAMConfigurationEditorTests: XCTestCase {
     private let offerLine = PAMIntegrationConstants.ownedOfferConfigurationLine
     private let restoreLine = PAMIntegrationConstants.ownedRestoreConfigurationLine
 
+    func testDetectsOnlyExactOwnedPayloadReferences() {
+        XCTAssertTrue(
+            PAMConfigurationEditor.hasOwnedPayloadReference(
+                in: Data("auth include sudo_local\n\(offerLine)\n".utf8)
+            )
+        )
+        XCTAssertTrue(
+            PAMConfigurationEditor.hasOwnedPayloadReference(
+                in: Data("\(restoreLine)\r\nauth required pam_opendirectory.so\r\n".utf8)
+            )
+        )
+        XCTAssertFalse(
+            PAMConfigurationEditor.hasOwnedPayloadReference(
+                in: Data("# \(offerLine)\nauth required pam_opendirectory.so\n".utf8)
+            )
+        )
+        XCTAssertFalse(
+            PAMConfigurationEditor.hasOwnedPayloadReference(
+                in: Data("auth optional \(PAMIntegrationConstants.installedModulePath) foreign\n".utf8)
+            )
+        )
+    }
+
     func testInstallsBeforePasswordModuleWithoutChangingCustomEntries() throws {
         let original = """
         # sudo: auth account password session
@@ -203,5 +226,66 @@ final class PAMConfigurationEditorTests: XCTestCase {
         )
         let updated = try PAMConfigurationEditor.uninstalling(from: configuration)
         XCTAssertEqual(updated, Data("auth include sudo_local\n".utf8))
+    }
+
+    func testInspectionOffersRemovalWhenUnsupportedConfigurationContainsOwnedLines() {
+        let configurations = [
+            "auth include sudo_local\n\(offerLine)\n\(restoreLine)\n",
+            "\(offerLine)\nauth required pam_opendirectory.so\nauth required pam_opendirectory.so\n\(restoreLine)\n",
+            "\(offerLine)\nauth required pam_opendirectory.so try_first_pass\n\(restoreLine)\n",
+        ]
+
+        for configuration in configurations {
+            XCTAssertEqual(
+                PAMConfigurationEditor.inspect(
+                    configuration: Data(configuration.utf8),
+                    moduleExists: false,
+                    moduleMatchesPayload: false,
+                    terminalReaderExists: false,
+                    terminalReaderMatchesPayload: false
+                ).state,
+                .removalOnly
+            )
+        }
+    }
+
+    func testInspectionOffersRemovalWhenUnsupportedConfigurationHasOwnedPayload() {
+        let inspection = PAMConfigurationEditor.inspect(
+            configuration: Data("auth required pam_opendirectory.so nullok\n".utf8),
+            moduleExists: true,
+            moduleMatchesPayload: true,
+            terminalReaderExists: false,
+            terminalReaderMatchesPayload: false
+        )
+
+        XCTAssertEqual(inspection.state, .removalOnly)
+    }
+
+    func testInspectionDoesNotOfferRemovalWithoutOwnedArtifacts() {
+        let inspection = PAMConfigurationEditor.inspect(
+            configuration: Data("auth include sudo_local\n".utf8),
+            moduleExists: false,
+            moduleMatchesPayload: false,
+            terminalReaderExists: false,
+            terminalReaderMatchesPayload: false
+        )
+
+        XCTAssertEqual(inspection.state, .unsupported)
+    }
+
+    func testInspectionDoesNotOfferRemovalForForeignModuleReference() {
+        let configuration = """
+        \(offerLine)
+        auth optional /Library/Security/WhoSudod/pam_whosudod.so foreign_argument
+        """
+        let inspection = PAMConfigurationEditor.inspect(
+            configuration: Data(configuration.utf8),
+            moduleExists: true,
+            moduleMatchesPayload: true,
+            terminalReaderExists: false,
+            terminalReaderMatchesPayload: false
+        )
+
+        XCTAssertEqual(inspection.state, .unsupported)
     }
 }
