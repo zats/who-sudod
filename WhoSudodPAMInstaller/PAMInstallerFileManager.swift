@@ -113,6 +113,12 @@ final class PAMInstallerFileManager {
         let activatedConfiguration: Data
         let configurationInitiallyReferencesPayloads: Bool
 
+        func recoverInterruptedMutation() throws {
+            try files.recoverInterruptedMutation(
+                expectedConfiguration: initialConfiguration
+            )
+        }
+
         func activateCompletePayloadSet() throws -> PayloadActivation {
             try files.replacePayloadSetAtomically(
                 module: module,
@@ -178,6 +184,12 @@ final class PAMInstallerFileManager {
         let initialConfiguration: FileSnapshot
         let updatedConfiguration: Data
 
+        func recoverInterruptedMutation() throws {
+            try files.recoverInterruptedMutation(
+                expectedConfiguration: initialConfiguration
+            )
+        }
+
         func commitConfigurationWithoutPayloadReferences() throws {
             guard updatedConfiguration != initialConfiguration.data else {
                 return
@@ -210,7 +222,7 @@ final class PAMInstallerFileManager {
         }
 
         func removePayloadSet() throws {
-            try files.removeInstalledPayloads()
+            try files.removeUnreferencedManagedArtifacts()
         }
     }
 
@@ -690,10 +702,11 @@ final class PAMInstallerFileManager {
     }
 
     private func commitPayloadActivation(_ activation: PayloadActivation) {
-        guard let previousDirectoryPath = activation.previousDirectoryPath else {
-            return
+        if let previousDirectoryPath = activation.previousDirectoryPath {
+            try? removeManagedPayloadDirectory(at: previousDirectoryPath)
         }
-        try? removeManagedPayloadDirectory(at: previousDirectoryPath)
+        try? removeStagedPayloadDirectories()
+        try? removeTemporaryConfigurationFiles()
     }
 
     private func rollbackPayloadActivation(_ activation: PayloadActivation) throws {
@@ -724,6 +737,7 @@ final class PAMInstallerFileManager {
         // The active path is restored. Failure to remove the inactive new set
         // cannot leave sudo with a missing module.
         try? removeManagedPayloadDirectory(at: previousDirectoryPath)
+        try? removeStagedPayloadDirectories()
     }
 
     private func installPayload(
@@ -942,31 +956,104 @@ final class PAMInstallerFileManager {
         return hasExpectedMetadata
     }
 
+    private func recoverInterruptedMutation(
+        expectedConfiguration: FileSnapshot
+    ) throws {
+        let currentConfiguration = try secureFileSnapshot(path: configurationPath)
+        guard currentConfiguration.version == expectedConfiguration.version,
+              currentConfiguration.data == expectedConfiguration.data else {
+            throw PAMInstallerFileError.concurrentModification(configurationPath)
+        }
+
+        // The configuration is the recovery commit record. Make its current
+        // rename durable before deleting a payload that an older on-disk
+        // version could still reference after a restart.
+        try persistenceBarrier(
+            path: (configurationPath as NSString).deletingLastPathComponent
+        )
+        let persistedConfiguration = try secureFileSnapshot(path: configurationPath)
+        guard persistedConfiguration.version == currentConfiguration.version,
+              persistedConfiguration.data == currentConfiguration.data else {
+            throw PAMInstallerFileError.concurrentModification(configurationPath)
+        }
+
+        try removeTemporaryConfigurationFiles()
+        if PAMConfigurationEditor.hasOwnedPayloadReference(
+            in: persistedConfiguration.data
+        ) {
+            if try installedPayloadSetIsComplete() {
+                try removeStagedPayloadDirectories()
+            }
+        } else {
+            try removeUnreferencedManagedArtifacts()
+        }
+    }
+
+    private func installedPayloadSetIsComplete() throws -> Bool {
+        var metadata = stat()
+        guard lstat(installationDirectoryPath, &metadata) == 0 else {
+            if errno == ENOENT { return false }
+            throw posixError("Inspect the PAM installation directory")
+        }
+        let names = try managedPayloadNames(
+            at: installationDirectoryPath,
+            allowsTemporaryPayloads: false
+        )
+        return Set(names) == allowedInstalledPayloadNames
+    }
+
+    private func removeUnreferencedManagedArtifacts() throws {
+        try removeInstalledPayloads()
+        try removeStagedPayloadDirectories()
+        try removeTemporaryConfigurationFiles()
+    }
+
     private func removeInstalledPayloads() throws {
         try removeManagedPayloadDirectory(at: installationDirectoryPath)
+    }
+
+    private var allowedInstalledPayloadNames: Set<String> {
+        [
+            (installedModulePath as NSString).lastPathComponent,
+            (installedTerminalReaderPath as NSString).lastPathComponent,
+        ]
     }
 
     private func requireManagedPayloadDirectory(
         at directoryPath: String,
         requiresBothPayloads: Bool
     ) throws {
-        try requireSafeDirectory(path: directoryPath)
-        let moduleName = (installedModulePath as NSString).lastPathComponent
-        let terminalReaderName = (installedTerminalReaderPath as NSString).lastPathComponent
-        let allowedNames = Set([moduleName, terminalReaderName])
-        let names = try FileManager.default.contentsOfDirectory(atPath: directoryPath)
+        let names = try managedPayloadNames(
+            at: directoryPath,
+            allowsTemporaryPayloads: false
+        )
         let nameSet = Set(names)
-        guard nameSet.isSubset(of: allowedNames),
-              !requiresBothPayloads || nameSet == allowedNames else {
+        guard !requiresBothPayloads || nameSet == allowedInstalledPayloadNames else {
             throw PAMInstallerFileError.unsafeFile(directoryPath)
-        }
-
-        for name in names {
-            try requireRemovableInstalledPayload(at: directoryPath + "/" + name)
         }
     }
 
-    private func removeManagedPayloadDirectory(at directoryPath: String) throws {
+    private func managedPayloadNames(
+        at directoryPath: String,
+        allowsTemporaryPayloads: Bool
+    ) throws -> [String] {
+        try requireSafeDirectory(path: directoryPath)
+        let names = try FileManager.default.contentsOfDirectory(atPath: directoryPath)
+        for name in names {
+            guard allowedInstalledPayloadNames.contains(name)
+                    || allowsTemporaryPayloads
+                    && PAMInstallerArtifactName.isTemporaryPayload(name) else {
+                throw PAMInstallerFileError.unsafeFile(directoryPath)
+            }
+            try requireRemovableInstalledPayload(at: directoryPath + "/" + name)
+        }
+        return names
+    }
+
+    private func removeManagedPayloadDirectory(
+        at directoryPath: String,
+        allowsTemporaryPayloads: Bool = false
+    ) throws {
         var directoryMetadata = stat()
         if lstat(directoryPath, &directoryMetadata) != 0 {
             guard errno == ENOENT else {
@@ -974,19 +1061,60 @@ final class PAMInstallerFileManager {
             }
             return
         }
-        try requireManagedPayloadDirectory(at: directoryPath, requiresBothPayloads: false)
-        try removeInstalledPayload(
-            at: directoryPath + "/"
-                + (installedTerminalReaderPath as NSString).lastPathComponent
+        let names = try managedPayloadNames(
+            at: directoryPath,
+            allowsTemporaryPayloads: allowsTemporaryPayloads
         )
-        try removeInstalledPayload(
-            at: directoryPath + "/" + (installedModulePath as NSString).lastPathComponent
-        )
+        for name in names.sorted() {
+            try removeInstalledPayload(at: directoryPath + "/" + name)
+        }
         try syncDirectory(path: directoryPath)
-        if rmdir(directoryPath) != 0, errno != ENOTEMPTY {
+        guard rmdir(directoryPath) == 0 else {
             throw posixError("Remove the PAM installation directory")
         }
         try syncDirectory(path: (directoryPath as NSString).deletingLastPathComponent)
+    }
+
+    private func removeStagedPayloadDirectories() throws {
+        let parentDirectoryPath = (installationDirectoryPath as NSString)
+            .deletingLastPathComponent
+        try requireSafeDirectory(path: parentDirectoryPath, exactMode: 0o755)
+        let names = try FileManager.default.contentsOfDirectory(
+            atPath: parentDirectoryPath
+        )
+        for name in names.sorted()
+        where PAMInstallerArtifactName.isStagingDirectory(name) {
+            try removeManagedPayloadDirectory(
+                at: parentDirectoryPath + "/" + name,
+                allowsTemporaryPayloads: true
+            )
+        }
+    }
+
+    private func removeTemporaryConfigurationFiles() throws {
+        let directoryPath = (configurationPath as NSString).deletingLastPathComponent
+        try requireSafeDirectory(path: directoryPath, exactMode: 0o755)
+        let names = try FileManager.default.contentsOfDirectory(atPath: directoryPath)
+        var removedFile = false
+        for name in names.sorted()
+        where PAMInstallerArtifactName.isTemporaryConfiguration(name) {
+            let path = directoryPath + "/" + name
+            var metadata = stat()
+            if lstat(path, &metadata) != 0 {
+                guard errno == ENOENT else {
+                    throw posixError("Inspect the temporary sudo PAM configuration")
+                }
+                continue
+            }
+            try requireRemovableInstalledPayload(at: path, metadata: metadata)
+            guard unlink(path) == 0 else {
+                throw posixError("Remove the temporary sudo PAM configuration")
+            }
+            removedFile = true
+        }
+        if removedFile {
+            try syncDirectory(path: directoryPath)
+        }
     }
 
     private func removeInstalledPayload(at path: String) throws {

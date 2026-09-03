@@ -1,5 +1,41 @@
+enum PAMInstallerArtifactName {
+    static func isStagingDirectory(_ name: String) -> Bool {
+        hasGeneratedSuffix(name, prefix: ".WhoSudod.stage.")
+    }
+
+    static func isTemporaryConfiguration(_ name: String) -> Bool {
+        hasGeneratedSuffix(name, prefix: ".sudo.whosudod.")
+    }
+
+    static func isTemporaryPayload(_ name: String) -> Bool {
+        hasGeneratedSuffix(name, prefix: ".pam_whosudod.so.")
+            || hasGeneratedSuffix(
+                name,
+                prefix: ".whosudod-pam-terminal-reader."
+            )
+    }
+
+    private static func hasGeneratedSuffix(
+        _ name: String,
+        prefix: String
+    ) -> Bool {
+        guard name.hasPrefix(prefix) else { return false }
+        let suffix = name.dropFirst(prefix.count).utf8
+        guard suffix.count == 6 else { return false }
+        return suffix.allSatisfy { byte in
+            (byte >= 48 && byte <= 57)
+                || (byte >= 65 && byte <= 90)
+                || (byte >= 97 && byte <= 122)
+        }
+    }
+}
+
 protocol PAMInstallTransactionOperations {
     associatedtype PayloadActivation
+
+    /// Reconciles artifacts left by an interrupted earlier mutation. This must
+    /// be idempotent because it can itself be interrupted and retried.
+    func recoverInterruptedMutation() throws
 
     /// Atomically publishes a complete payload set. If this throws, the
     /// previously active payload set must remain active.
@@ -32,6 +68,7 @@ struct PAMInstallTransactionCoordinator<Operations: PAMInstallTransactionOperati
     let operations: Operations
 
     func run() throws {
+        try operations.recoverInterruptedMutation()
         let activation = try operations.activateCompletePayloadSet()
         var configurationCommitted = false
         var activationWasPersisted = false
@@ -58,6 +95,10 @@ struct PAMInstallTransactionCoordinator<Operations: PAMInstallTransactionOperati
 }
 
 protocol PAMUninstallTransactionOperations {
+    /// Reconciles artifacts left by an interrupted earlier mutation. This must
+    /// be idempotent because it can itself be interrupted and retried.
+    func recoverInterruptedMutation() throws
+
     /// Atomically publishes a PAM configuration without Who Sudo'd references.
     /// This method must not throw after that rename commits.
     func commitConfigurationWithoutPayloadReferences() throws
@@ -74,6 +115,7 @@ struct PAMUninstallTransactionCoordinator<Operations: PAMUninstallTransactionOpe
     let operations: Operations
 
     func run() throws {
+        try operations.recoverInterruptedMutation()
         try operations.commitConfigurationWithoutPayloadReferences()
         try operations.persistConfigurationWithoutPayloadReferences()
         try operations.validatePayloadRemoval()

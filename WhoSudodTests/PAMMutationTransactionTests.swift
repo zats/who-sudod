@@ -10,12 +10,50 @@ final class PAMMutationTransactionTests: XCTestCase {
     private struct PublishedState: Equatable {
         var payloads: PayloadSet
         var configurationReferencesPayloads: Bool
+        var durableConfigurationReferencesPayloads: Bool
+        var stagedPayloads: [PayloadSet]
+        var hasTemporaryConfiguration: Bool
+
+        init(
+            payloads: PayloadSet,
+            configurationReferencesPayloads: Bool,
+            durableConfigurationReferencesPayloads: Bool? = nil,
+            stagedPayloads: [PayloadSet] = [],
+            hasTemporaryConfiguration: Bool = false
+        ) {
+            self.payloads = payloads
+            self.configurationReferencesPayloads = configurationReferencesPayloads
+            self.durableConfigurationReferencesPayloads =
+                durableConfigurationReferencesPayloads
+                ?? configurationReferencesPayloads
+            self.stagedPayloads = stagedPayloads
+            self.hasTemporaryConfiguration = hasTemporaryConfiguration
+        }
 
         var isSafe: Bool {
-            !configurationReferencesPayloads || {
+            !(configurationReferencesPayloads
+                || durableConfigurationReferencesPayloads) || {
                 if case .complete = payloads { return true }
                 return false
             }()
+        }
+
+        var hasManagedResidue: Bool {
+            !stagedPayloads.isEmpty || hasTemporaryConfiguration
+        }
+
+        mutating func recoverInterruptedMutation() {
+            durableConfigurationReferencesPayloads =
+                configurationReferencesPayloads
+            hasTemporaryConfiguration = false
+            if configurationReferencesPayloads {
+                if case .complete = payloads {
+                    stagedPayloads.removeAll()
+                }
+            } else {
+                payloads = .absent
+                stagedPayloads.removeAll()
+            }
         }
     }
 
@@ -24,6 +62,7 @@ final class PAMMutationTransactionTests: XCTestCase {
     }
 
     private enum InstallBoundary: String, CaseIterable {
+        case recoverInterruptedMutation
         case activatePayloads
         case validatePayloads
         case persistPayloads
@@ -42,10 +81,22 @@ final class PAMMutationTransactionTests: XCTestCase {
         var leavePreviousPayloadsAfterCommit = false
         var failToRestorePreviousPayloads = false
         private(set) var activationWasPersisted = false
+        private let startedSafe: Bool
 
         init(state: PublishedState, failure: InstallBoundary? = nil) {
             self.state = state
             self.failure = failure
+            startedSafe = state.isSafe
+        }
+
+        func recoverInterruptedMutation() throws {
+            calls.append(.recoverInterruptedMutation)
+            snapshots.append(state)
+            if failure == .recoverInterruptedMutation {
+                throw InjectedFailure.boundary
+            }
+            state.recoverInterruptedMutation()
+            snapshots.append(state)
         }
 
         func activateCompletePayloadSet() throws -> PayloadSet {
@@ -57,6 +108,9 @@ final class PAMMutationTransactionTests: XCTestCase {
             }
             let previous = state.payloads
             previousPayloads = previous
+            if previous != .absent {
+                state.stagedPayloads.append(previous)
+            }
             state.payloads = .complete(2)
             recordPublishedState()
             return previous
@@ -83,12 +137,14 @@ final class PAMMutationTransactionTests: XCTestCase {
             }
             XCTAssertEqual(state.payloads, .complete(2))
             state.configurationReferencesPayloads = true
+            state.durableConfigurationReferencesPayloads = true
             recordPublishedState()
         }
 
         func discardPreviousPayloadSet(after activation: PayloadSet) {
             guard !leavePreviousPayloadsAfterCommit else { return }
             previousPayloads = nil
+            state.stagedPayloads.removeAll()
         }
 
         func recoverFromPrecommitFailure(
@@ -102,12 +158,14 @@ final class PAMMutationTransactionTests: XCTestCase {
             if state.configurationReferencesPayloads {
                 if activationWasPersisted {
                     previousPayloads = nil
+                    state.stagedPayloads.removeAll()
                 }
                 recordPublishedState()
                 return
             }
             state.payloads = activation
             previousPayloads = nil
+            state.stagedPayloads.removeAll()
             recordPublishedState()
         }
 
@@ -121,11 +179,14 @@ final class PAMMutationTransactionTests: XCTestCase {
 
         private func recordPublishedState() {
             snapshots.append(state)
-            XCTAssertTrue(state.isSafe)
+            if startedSafe {
+                XCTAssertTrue(state.isSafe)
+            }
         }
     }
 
     private enum UninstallBoundary: String, CaseIterable {
+        case recoverInterruptedMutation
         case commitConfiguration
         case persistConfiguration
         case validateRemoval
@@ -137,10 +198,22 @@ final class PAMMutationTransactionTests: XCTestCase {
         private(set) var calls: [UninstallBoundary] = []
         private(set) var snapshots: [PublishedState] = []
         var failure: UninstallBoundary?
+        private let startedSafe: Bool
 
         init(state: PublishedState, failure: UninstallBoundary? = nil) {
             self.state = state
             self.failure = failure
+            startedSafe = state.isSafe
+        }
+
+        func recoverInterruptedMutation() throws {
+            calls.append(.recoverInterruptedMutation)
+            snapshots.append(state)
+            if failure == .recoverInterruptedMutation {
+                throw InjectedFailure.boundary
+            }
+            state.recoverInterruptedMutation()
+            snapshots.append(state)
         }
 
         func commitConfigurationWithoutPayloadReferences() throws {
@@ -155,6 +228,8 @@ final class PAMMutationTransactionTests: XCTestCase {
 
         func persistConfigurationWithoutPayloadReferences() throws {
             try reach(.persistConfiguration)
+            state.durableConfigurationReferencesPayloads = false
+            recordPublishedState()
         }
 
         func validatePayloadRemoval() throws {
@@ -165,6 +240,7 @@ final class PAMMutationTransactionTests: XCTestCase {
                 // after our atomic configuration commit. Validation must stop
                 // before either payload is removed.
                 state.configurationReferencesPayloads = true
+                state.durableConfigurationReferencesPayloads = true
                 recordPublishedState()
                 throw InjectedFailure.boundary
             }
@@ -182,6 +258,8 @@ final class PAMMutationTransactionTests: XCTestCase {
                 throw InjectedFailure.boundary
             }
             state.payloads = .absent
+            state.stagedPayloads.removeAll()
+            state.hasTemporaryConfiguration = false
             recordPublishedState()
         }
 
@@ -195,7 +273,9 @@ final class PAMMutationTransactionTests: XCTestCase {
 
         private func recordPublishedState() {
             snapshots.append(state)
-            XCTAssertTrue(state.isSafe)
+            if startedSafe {
+                XCTAssertTrue(state.isSafe)
+            }
         }
     }
 
@@ -214,6 +294,7 @@ final class PAMMutationTransactionTests: XCTestCase {
                     "Expected injected install failure at \(boundary.rawValue)"
                 )
                 if initialState.configurationReferencesPayloads,
+                   boundary != .recoverInterruptedMutation,
                    boundary != .activatePayloads {
                     XCTAssertEqual(operations.state.payloads, .complete(2))
                     XCTAssertTrue(operations.state.configurationReferencesPayloads)
@@ -259,6 +340,7 @@ final class PAMMutationTransactionTests: XCTestCase {
         XCTAssertEqual(operations.state.payloads, .complete(2))
         XCTAssertTrue(operations.state.configurationReferencesPayloads)
         XCTAssertEqual(operations.previousPayloads, .complete(1))
+        XCTAssertEqual(operations.state.stagedPayloads, [.complete(1)])
         XCTAssertTrue(operations.state.isSafe)
     }
 
@@ -305,7 +387,7 @@ final class PAMMutationTransactionTests: XCTestCase {
             configurationReferencesPayloads: true
         )
         let postActivationBoundaries = InstallBoundary.allCases.filter {
-            $0 != .activatePayloads
+            $0 != .recoverInterruptedMutation && $0 != .activatePayloads
         }
 
         for boundary in postActivationBoundaries {
@@ -338,7 +420,8 @@ final class PAMMutationTransactionTests: XCTestCase {
             XCTAssertTrue(operations.snapshots.allSatisfy(\.isSafe))
             XCTAssertEqual(operations.calls.last, boundary)
 
-            if boundary == .commitConfiguration {
+            if boundary == .recoverInterruptedMutation
+                || boundary == .commitConfiguration {
                 XCTAssertEqual(operations.state, initialState)
             } else if boundary == .validateRemoval {
                 XCTAssertEqual(operations.state, initialState)
@@ -376,6 +459,244 @@ final class PAMMutationTransactionTests: XCTestCase {
         XCTAssertEqual(
             operations.state,
             PublishedState(payloads: .absent, configurationReferencesPayloads: false)
+        )
+    }
+
+    func testRestartedInstallRemovesAnInterruptedStagingSet() throws {
+        let interruptedState = PublishedState(
+            payloads: .absent,
+            configurationReferencesPayloads: false,
+            stagedPayloads: [.partial],
+            hasTemporaryConfiguration: true
+        )
+        let operations = InstallOperations(state: interruptedState)
+
+        try PAMInstallTransactionCoordinator(operations: operations).run()
+
+        XCTAssertEqual(
+            operations.snapshots[1],
+            PublishedState(
+                payloads: .absent,
+                configurationReferencesPayloads: false
+            )
+        )
+        XCTAssertEqual(
+            operations.state,
+            PublishedState(
+                payloads: .complete(2),
+                configurationReferencesPayloads: true
+            )
+        )
+        XCTAssertFalse(operations.state.hasManagedResidue)
+    }
+
+    func testRestartedFreshInstallRemovesUnreferencedActivePayloads() throws {
+        let interruptedState = PublishedState(
+            payloads: .complete(2),
+            configurationReferencesPayloads: false,
+            stagedPayloads: [.complete(1)]
+        )
+        let operations = InstallOperations(state: interruptedState)
+
+        try PAMInstallTransactionCoordinator(operations: operations).run()
+
+        XCTAssertEqual(
+            operations.snapshots[1],
+            PublishedState(
+                payloads: .absent,
+                configurationReferencesPayloads: false
+            )
+        )
+        XCTAssertEqual(operations.state.payloads, .complete(2))
+        XCTAssertTrue(operations.state.configurationReferencesPayloads)
+        XCTAssertFalse(operations.state.hasManagedResidue)
+    }
+
+    func testRestartedRepairKeepsReferencedCompletePayloadsAndRemovesStaging() throws {
+        let interruptedState = PublishedState(
+            payloads: .complete(2),
+            configurationReferencesPayloads: true,
+            durableConfigurationReferencesPayloads: false,
+            stagedPayloads: [.partial],
+            hasTemporaryConfiguration: true
+        )
+        let operations = InstallOperations(state: interruptedState)
+
+        try PAMInstallTransactionCoordinator(operations: operations).run()
+
+        XCTAssertEqual(
+            operations.snapshots[1],
+            PublishedState(
+                payloads: .complete(2),
+                configurationReferencesPayloads: true
+            )
+        )
+        XCTAssertEqual(operations.state.payloads, .complete(2))
+        XCTAssertTrue(operations.state.configurationReferencesPayloads)
+        XCTAssertFalse(operations.state.hasManagedResidue)
+    }
+
+    func testRestartedUninstallRemovesPayloadsAfterConfigurationCommit() throws {
+        let operations = UninstallOperations(
+            state: PublishedState(
+                payloads: .complete(2),
+                configurationReferencesPayloads: false,
+                durableConfigurationReferencesPayloads: true,
+                stagedPayloads: [.complete(1)],
+                hasTemporaryConfiguration: true
+            )
+        )
+
+        try PAMUninstallTransactionCoordinator(operations: operations).run()
+
+        XCTAssertEqual(
+            operations.snapshots[1],
+            PublishedState(
+                payloads: .absent,
+                configurationReferencesPayloads: false
+            )
+        )
+        XCTAssertEqual(
+            operations.state,
+            PublishedState(
+                payloads: .absent,
+                configurationReferencesPayloads: false
+            )
+        )
+    }
+
+    func testRestartedUninstallRemovesAResumablePartialPayloadSet() throws {
+        let operations = UninstallOperations(
+            state: PublishedState(
+                payloads: .partial,
+                configurationReferencesPayloads: false,
+                stagedPayloads: [.partial]
+            )
+        )
+
+        try PAMUninstallTransactionCoordinator(operations: operations).run()
+
+        XCTAssertEqual(
+            operations.state,
+            PublishedState(
+                payloads: .absent,
+                configurationReferencesPayloads: false
+            )
+        )
+        XCTAssertTrue(operations.snapshots.allSatisfy(\.isSafe))
+    }
+
+    func testRepairAndRemovalPreserveReferencedBrokenStateUntilTheyCanMakeItSafe() throws {
+        for payloads in [PayloadSet.absent, .partial] {
+            let interruptedState = PublishedState(
+                payloads: payloads,
+                configurationReferencesPayloads: true,
+                stagedPayloads: [.complete(1)],
+                hasTemporaryConfiguration: true
+            )
+
+            let install = InstallOperations(state: interruptedState)
+            try PAMInstallTransactionCoordinator(operations: install).run()
+            XCTAssertEqual(install.snapshots[1].payloads, payloads)
+            XCTAssertTrue(install.snapshots[1].configurationReferencesPayloads)
+            XCTAssertEqual(install.state.payloads, .complete(2))
+            XCTAssertTrue(install.state.configurationReferencesPayloads)
+            XCTAssertFalse(install.state.hasManagedResidue)
+
+            let uninstall = UninstallOperations(state: interruptedState)
+            try PAMUninstallTransactionCoordinator(operations: uninstall).run()
+            XCTAssertEqual(
+                uninstall.state,
+                PublishedState(
+                    payloads: .absent,
+                    configurationReferencesPayloads: false
+                )
+            )
+        }
+    }
+
+    func testRecoveryIsIdempotentForPersistentInterruptedStates() throws {
+        let states = [
+            PublishedState(
+                payloads: .complete(2),
+                configurationReferencesPayloads: false,
+                stagedPayloads: [.partial],
+                hasTemporaryConfiguration: true
+            ),
+            PublishedState(
+                payloads: .complete(2),
+                configurationReferencesPayloads: true,
+                stagedPayloads: [.complete(1)],
+                hasTemporaryConfiguration: true
+            ),
+            PublishedState(
+                payloads: .partial,
+                configurationReferencesPayloads: true,
+                stagedPayloads: [.complete(2)],
+                hasTemporaryConfiguration: true
+            ),
+        ]
+
+        for state in states {
+            let operations = InstallOperations(state: state)
+            try operations.recoverInterruptedMutation()
+            let recoveredState = operations.state
+            try operations.recoverInterruptedMutation()
+
+            XCTAssertEqual(operations.state, recoveredState)
+        }
+    }
+
+    func testRecoveryFailureStopsBeforeTheTransactionMutatesAnythingElse() {
+        let state = PublishedState(
+            payloads: .complete(2),
+            configurationReferencesPayloads: false,
+            stagedPayloads: [.partial],
+            hasTemporaryConfiguration: true
+        )
+        let operations = InstallOperations(
+            state: state,
+            failure: .recoverInterruptedMutation
+        )
+
+        XCTAssertThrowsError(
+            try PAMInstallTransactionCoordinator(operations: operations).run()
+        )
+
+        XCTAssertEqual(operations.calls, [.recoverInterruptedMutation])
+        XCTAssertEqual(operations.state, state)
+    }
+
+    func testManagedArtifactNamesRequireAnExactRandomSuffix() {
+        XCTAssertTrue(PAMInstallerArtifactName.isStagingDirectory(".WhoSudod.stage.aB39Z0"))
+        XCTAssertTrue(PAMInstallerArtifactName.isTemporaryConfiguration(".sudo.whosudod.123abc"))
+        XCTAssertTrue(PAMInstallerArtifactName.isTemporaryPayload(".pam_whosudod.so.ABC123"))
+        XCTAssertTrue(
+            PAMInstallerArtifactName.isTemporaryPayload(
+                ".whosudod-pam-terminal-reader.abcDEF"
+            )
+        )
+
+        for name in [
+            ".WhoSudod.stage.",
+            ".WhoSudod.stage.12345",
+            ".WhoSudod.stage.1234567",
+            ".WhoSudod.stage.12345-",
+            ".WhoSudod.stage.12345é",
+            ".WhoSudod.stage.ABC123/foreign",
+            ".WhoSudod.staging.ABC123",
+        ] {
+            XCTAssertFalse(PAMInstallerArtifactName.isStagingDirectory(name))
+        }
+        XCTAssertFalse(
+            PAMInstallerArtifactName.isTemporaryConfiguration(
+                ".sudo.whosudod.ABC123.backup"
+            )
+        )
+        XCTAssertFalse(
+            PAMInstallerArtifactName.isTemporaryPayload(
+                ".pam_whosudod.so.ABC123.backup"
+            )
         )
     }
 }
