@@ -1,6 +1,44 @@
 import CryptoKit
+import Darwin
 import Foundation
 import Security
+
+enum PAMExtendedACLInspection: Equatable {
+    case absent
+    case present
+    case queryFailed(Int32)
+}
+
+enum PAMExtendedACLInspector {
+    static func inspect(path: String) -> PAMExtendedACLInspection {
+        errno = 0
+        let accessControlList = acl_get_file(path, ACL_TYPE_EXTENDED)
+        return inspection(
+            accessControlList: accessControlList,
+            errorCode: errno
+        )
+    }
+
+    static func inspect(fileDescriptor: Int32) -> PAMExtendedACLInspection {
+        errno = 0
+        let accessControlList = acl_get_fd_np(fileDescriptor, ACL_TYPE_EXTENDED)
+        return inspection(
+            accessControlList: accessControlList,
+            errorCode: errno
+        )
+    }
+
+    private static func inspection(
+        accessControlList: acl_t?,
+        errorCode: Int32
+    ) -> PAMExtendedACLInspection {
+        guard let accessControlList else {
+            return errorCode == ENOENT ? .absent : .queryFailed(errorCode)
+        }
+        acl_free(UnsafeMutableRawPointer(accessControlList))
+        return .present
+    }
+}
 
 enum PAMIntegrationConstants {
     static let machServiceName = "com.zats.WhoSudo.PAMInstaller"

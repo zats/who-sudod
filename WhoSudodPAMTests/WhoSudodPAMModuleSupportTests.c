@@ -2,6 +2,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include <util.h>
 
 #include "../WhoSudodPAM/WhoSudodPAM.c"
 
@@ -176,6 +177,97 @@ test_non_sudo_callback_is_rejected(void)
     assert(!whosudod_pam_callback_is_stock_sudo(&conversation));
 }
 
+static void
+add_extended_acl(const char *path)
+{
+    int status = 0;
+    pid_t child = fork();
+    pid_t waited;
+
+    assert(child >= 0);
+    if (child == 0) {
+        execl(
+            "/bin/chmod",
+            "chmod",
+            "+a",
+            "group:everyone allow read",
+            path,
+            NULL
+        );
+        _exit(127);
+    }
+
+    do {
+        waited = waitpid(child, &status, 0);
+    } while (waited < 0 && errno == EINTR);
+    assert(waited == child);
+    assert(WIFEXITED(status));
+    assert(WEXITSTATUS(status) == 0);
+}
+
+static void
+test_extended_acl_policy(void)
+{
+    char path[] = "/private/tmp/whosudod-pam-acl-test.XXXXXX";
+    int descriptor = mkstemp(path);
+
+    assert(descriptor >= 0);
+    assert(close(descriptor) == 0);
+    assert(whosudod_pam_path_has_no_extended_acl(path));
+
+    add_extended_acl(path);
+    assert(!whosudod_pam_path_has_no_extended_acl(path));
+
+    assert(unlink(path) == 0);
+}
+
+static void
+test_real_controlling_terminal(void)
+{
+    int master = -1;
+    int other_master = -1;
+    int other_slave = -1;
+    int status = 0;
+    char terminal_path[PATH_MAX];
+    char other_path[PATH_MAX];
+    pid_t child;
+    pid_t waited;
+
+    assert(openpty(&other_master, &other_slave, other_path, NULL, NULL) == 0);
+    child = forkpty(&master, terminal_path, NULL, NULL);
+    assert(child >= 0);
+    if (child == 0) {
+        struct pam_conv conversation = {
+            .conv = test_conversation,
+            .appdata_ptr = NULL,
+        };
+        pam_handle_t *pamh = NULL;
+        struct whosudod_pam_terminal terminal;
+
+        alarm(5);
+        assert(pam_start("sudo", "whosudod-test", &conversation, &pamh) == PAM_SUCCESS);
+        assert(pam_set_item(pamh, PAM_TTY, terminal_path) == PAM_SUCCESS);
+        assert(whosudod_pam_terminal_open(pamh, &terminal));
+        whosudod_pam_terminal_close(&terminal);
+
+        assert(pam_set_item(pamh, PAM_TTY, other_path) == PAM_SUCCESS);
+        assert(!whosudod_pam_terminal_open(pamh, &terminal));
+        assert(pam_set_item(pamh, PAM_TTY, "/dev/null") == PAM_SUCCESS);
+        assert(!whosudod_pam_terminal_open(pamh, &terminal));
+        assert(pam_end(pamh, PAM_SUCCESS) == PAM_SUCCESS);
+        _exit(0);
+    }
+
+    do {
+        waited = waitpid(child, &status, 0);
+    } while (waited < 0 && errno == EINTR);
+    assert(waited == child);
+    assert(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+    close(master);
+    close(other_master);
+    close(other_slave);
+}
+
 int
 main(void)
 {
@@ -183,6 +275,8 @@ main(void)
     test_fragmented_and_coalesced_frames();
     test_invalid_frames();
     test_non_sudo_callback_is_rejected();
+    test_extended_acl_policy();
+    test_real_controlling_terminal();
     puts("WhoSudod PAM module support tests passed");
     return 0;
 }

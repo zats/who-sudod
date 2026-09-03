@@ -512,40 +512,23 @@ final class PAMIntegrationController {
     }
 
     private func requireNoExtendedACL(path: String) throws {
-        errno = 0
-        guard let accessControlList = acl_get_file(path, ACL_TYPE_EXTENDED) else {
-            if errno == ENOENT {
-                return
-            }
+        switch PAMExtendedACLInspector.inspect(path: path) {
+        case .absent:
+            return
+        case .present:
+            throw PAMLocalInspectionError.unsafePath(path)
+        case .queryFailed:
             throw CocoaError(.fileReadUnknown)
         }
-        defer { acl_free(UnsafeMutableRawPointer(accessControlList)) }
-        try requireEmptyAccessControlList(accessControlList, path: path)
     }
 
     private func requireNoExtendedACL(fd: Int32, path: String) throws {
-        errno = 0
-        guard let accessControlList = acl_get_fd_np(fd, ACL_TYPE_EXTENDED) else {
-            if errno == ENOENT {
-                return
-            }
-            throw CocoaError(.fileReadUnknown)
-        }
-        defer { acl_free(UnsafeMutableRawPointer(accessControlList)) }
-        try requireEmptyAccessControlList(accessControlList, path: path)
-    }
-
-    private func requireEmptyAccessControlList(_ accessControlList: acl_t, path: String) throws {
-        var entry: acl_entry_t?
-        let result = acl_get_entry(
-            accessControlList,
-            Int32(ACL_FIRST_ENTRY.rawValue),
-            &entry
-        )
-        if result == 1 {
+        switch PAMExtendedACLInspector.inspect(fileDescriptor: fd) {
+        case .absent:
+            return
+        case .present:
             throw PAMLocalInspectionError.unsafePath(path)
-        }
-        if result < 0 {
+        case .queryFailed:
             throw CocoaError(.fileReadUnknown)
         }
     }

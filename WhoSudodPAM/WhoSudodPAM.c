@@ -8,6 +8,7 @@
 #include <libproc.h>
 #include <limits.h>
 #include <mach/message.h>
+#include <os/log.h>
 #include <poll.h>
 #include <security/pam_appl.h>
 #include <security/pam_modules.h>
@@ -709,6 +710,7 @@ whosudod_pam_is_sudo_process(void)
     int length;
 
     if (getuid() == 0 || geteuid() != 0) {
+        os_log(OS_LOG_DEFAULT, "WhoSudod PAM: ineligible sudo identity uid=%u euid=%u", getuid(), geteuid());
         return false;
     }
 
@@ -732,10 +734,12 @@ whosudod_pam_invocation_is_allowed(pam_handle_t *pamh)
             pamh,
             WHOSUDOD_PAM_ASKPASS_DATA_KEY,
             &askpass_data) == PAM_SUCCESS) {
+        os_log(OS_LOG_DEFAULT, "WhoSudod PAM: askpass mode");
         return false;
     }
 
     if (!whosudod_pam_load_process_arguments(&process_arguments)) {
+        os_log(OS_LOG_DEFAULT, "WhoSudod PAM: process arguments unavailable");
         return false;
     }
     allowed = whosudod_pam_invocation_allows_password_input(
@@ -762,9 +766,16 @@ whosudod_pam_callback_is_stock_sudo(const struct pam_conv *conversation)
         sizeof(callback_address)
     );
     memset(&information, 0, sizeof(information));
-    return dladdr(callback_address, &information) != 0 &&
-        information.dli_fname != NULL &&
-        strcmp(information.dli_fname, "/usr/bin/sudo") == 0;
+    if (dladdr(callback_address, &information) == 0 ||
+        information.dli_fname == NULL) {
+        os_log(OS_LOG_DEFAULT, "WhoSudod PAM: conversation image unavailable");
+        return false;
+    }
+    if (strcmp(information.dli_fname, "/usr/bin/sudo") != 0) {
+        os_log(OS_LOG_DEFAULT, "WhoSudod PAM: unrecognized conversation image %{public}s", information.dli_fname);
+        return false;
+    }
+    return true;
 }
 
 static bool
@@ -804,6 +815,7 @@ whosudod_pam_terminal_open(
     char pam_terminal[WHOSUDOD_PAM_MAX_TTY_SIZE + 1U];
     struct stat expected_status;
     struct stat actual_status;
+    struct proc_bsdinfo process_information;
     pid_t foreground_group;
 
     if (terminal == NULL) {
@@ -827,11 +839,21 @@ whosudod_pam_terminal_open(
     if (terminal->descriptor < 0) {
         return false;
     }
+    // /dev/tty is a device alias. Its st_rdev is not the actual terminal's
+    // device number, so compare PAM_TTY with the kernel's controlling tty.
+    memset(&process_information, 0, sizeof(process_information));
     if (stat(pam_terminal, &expected_status) != 0 ||
         fstat(terminal->descriptor, &actual_status) != 0 ||
         !S_ISCHR(expected_status.st_mode) ||
         !S_ISCHR(actual_status.st_mode) ||
-        expected_status.st_rdev != actual_status.st_rdev) {
+        proc_pidinfo(
+            getpid(),
+            PROC_PIDTBSDINFO,
+            0,
+            &process_information,
+            sizeof(process_information)) != sizeof(process_information) ||
+        process_information.e_tdev == (uint32_t)NODEV ||
+        (uint32_t)expected_status.st_rdev != process_information.e_tdev) {
         whosudod_pam_close(&terminal->descriptor);
         return false;
     }
@@ -1004,6 +1026,7 @@ whosudod_pam_verify_peer(int descriptor, uid_t expected_user_id)
             &peer_token,
             &peer_token_length) != 0 ||
         peer_token_length != sizeof(peer_token)) {
+        os_log(OS_LOG_DEFAULT, "WhoSudod PAM: app peer credentials unavailable or mismatched");
         return false;
     }
     (void)peer_group_id;
@@ -1039,6 +1062,7 @@ whosudod_pam_verify_peer(int descriptor, uid_t expected_user_id)
         &peer_code
     );
     if (status != errSecSuccess || peer_code == NULL) {
+        os_log(OS_LOG_DEFAULT, "WhoSudod PAM: app code identity lookup failed %d", (int)status);
         goto finished;
     }
     status = SecRequirementCreateWithString(
@@ -1049,11 +1073,15 @@ whosudod_pam_verify_peer(int descriptor, uid_t expected_user_id)
     if (status != errSecSuccess || requirement == NULL) {
         goto finished;
     }
-    trusted = SecCodeCheckValidity(
+    status = SecCodeCheckValidity(
         peer_code,
         kSecCSStrictValidate,
         requirement
-    ) == errSecSuccess;
+    );
+    trusted = status == errSecSuccess;
+    if (!trusted) {
+        os_log(OS_LOG_DEFAULT, "WhoSudod PAM: app signature check failed %d", (int)status);
+    }
 
 finished:
     if (requirement != NULL) {
@@ -1086,6 +1114,7 @@ whosudod_pam_connect_to_app(uid_t user_id)
 
     memset(socket_path, 0, sizeof(socket_path));
     if (!whosudod_pam_validate_socket_path(user_id, socket_path)) {
+        os_log(OS_LOG_DEFAULT, "WhoSudod PAM: app socket unavailable");
         return -1;
     }
 
@@ -1109,6 +1138,7 @@ whosudod_pam_connect_to_app(uid_t user_id)
     } while (connection_result != 0 && errno == EINTR);
     if (connection_result != 0 && errno != EINPROGRESS &&
         errno != EALREADY && errno != EISCONN) {
+        os_log(OS_LOG_DEFAULT, "WhoSudod PAM: app socket connect failed %d", errno);
         whosudod_pam_close(&descriptor);
         return -1;
     }
@@ -1304,20 +1334,16 @@ static bool
 whosudod_pam_path_has_no_extended_acl(const char *path)
 {
     acl_t access_control_list;
-    acl_entry_t entry = NULL;
-    int entry_result;
+    int query_error;
 
+    errno = 0;
     access_control_list = acl_get_file(path, ACL_TYPE_EXTENDED);
+    query_error = errno;
     if (access_control_list == NULL) {
-        return false;
+        return query_error == ENOENT;
     }
-    entry_result = acl_get_entry(
-        access_control_list,
-        ACL_FIRST_ENTRY,
-        &entry
-    );
     (void)acl_free(access_control_list);
-    return entry_result == 0;
+    return false;
 }
 
 static bool
@@ -2035,6 +2061,7 @@ whosudod_pam_handle_password_prompt(
 
     if (!whosudod_pam_invocation_is_allowed(pamh) ||
         !whosudod_pam_terminal_open(pamh, &terminal)) {
+        os_log(OS_LOG_DEFAULT, "WhoSudod PAM: password invocation or terminal no longer eligible");
         return whosudod_pam_call_original(
             original,
             message_count,
@@ -2043,6 +2070,7 @@ whosudod_pam_handle_password_prompt(
         );
     }
     if (!whosudod_pam_validate_helper()) {
+        os_log(OS_LOG_DEFAULT, "WhoSudod PAM: terminal reader validation failed");
         whosudod_pam_terminal_close(&terminal);
         return whosudod_pam_call_original(
             original,
@@ -2053,6 +2081,7 @@ whosudod_pam_handle_password_prompt(
     }
 
     app_descriptor = whosudod_pam_connect_to_app(getuid());
+    os_log(OS_LOG_DEFAULT, "WhoSudod PAM: app connection %s", app_descriptor >= 0 ? "opened" : "unavailable");
     arc4random_buf(request_id, sizeof(request_id));
     if (app_descriptor < 0 ||
         !whosudod_pam_send_begin(
@@ -2064,6 +2093,7 @@ whosudod_pam_handle_password_prompt(
             app_descriptor,
             request_id,
             &app_reader)) {
+        os_log(OS_LOG_DEFAULT, "WhoSudod PAM: app did not accept the password request");
         whosudod_pam_send_end(app_descriptor, request_id);
         whosudod_pam_close(&app_descriptor);
         whosudod_pam_terminal_close(&terminal);
@@ -2091,6 +2121,7 @@ whosudod_pam_handle_password_prompt(
             &previous_signal_mask,
             &helper_descriptor,
             &helper_process)) {
+        os_log(OS_LOG_DEFAULT, "WhoSudod PAM: terminal reader spawn failed");
         whosudod_pam_send_end(app_descriptor, request_id);
         whosudod_pam_close(&app_descriptor);
         whosudod_pam_terminal_close(&terminal);
@@ -2100,6 +2131,7 @@ whosudod_pam_handle_password_prompt(
         return PAM_CONV_ERR;
     }
     helper_spawned = true;
+    os_log(OS_LOG_DEFAULT, "WhoSudod PAM: app and terminal password input ready");
 
     if (!whosudod_pam_send_frame(
             helper_descriptor,
@@ -2243,6 +2275,7 @@ whosudod_pam_conversation(
     if (!whosudod_pam_is_account_password_conversation(
             message_count,
             messages)) {
+        os_log(OS_LOG_DEFAULT, "WhoSudod PAM: conversation is not an account password prompt");
         return whosudod_pam_call_original(
             &original,
             message_count,
@@ -2316,9 +2349,15 @@ whosudod_pam_offer(
     const struct pam_conv *current;
     bool new_state = false;
 
-    if (!whosudod_pam_invocation_is_allowed(pamh) ||
-        !whosudod_pam_terminal_is_eligible(pamh) ||
-        pam_get_item(
+    if (!whosudod_pam_invocation_is_allowed(pamh)) {
+        os_log(OS_LOG_DEFAULT, "WhoSudod PAM: invocation is not eligible");
+        return PAM_IGNORE;
+    }
+    if (!whosudod_pam_terminal_is_eligible(pamh)) {
+        os_log(OS_LOG_DEFAULT, "WhoSudod PAM: terminal is not eligible");
+        return PAM_IGNORE;
+    }
+    if (pam_get_item(
             pamh,
             PAM_CONV,
             &current_item) != PAM_SUCCESS ||
@@ -2365,6 +2404,7 @@ whosudod_pam_offer(
         return PAM_IGNORE;
     }
     state->armed = true;
+    os_log(OS_LOG_DEFAULT, "WhoSudod PAM: password conversation armed");
     return PAM_IGNORE;
 }
 
