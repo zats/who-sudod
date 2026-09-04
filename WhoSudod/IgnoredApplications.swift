@@ -170,11 +170,10 @@ final class IgnoredApplicationsStore {
         at url: URL,
         requestKinds: Set<AuthenticationRequestKind> = Set(AuthenticationRequestKind.allCases)
     ) -> IgnoredApplicationRule? {
-        guard !requestKinds.isEmpty,
-              let rule = Self.makeRule(
-                applicationURL: url,
-                requestKinds: requestKinds
-              ) else {
+        guard let rule = Self.makeRule(
+            applicationURL: url,
+            requestKinds: requestKinds
+        ) else {
             return nil
         }
         if let index = rules.firstIndex(where: { $0.identifier == rule.identifier }) {
@@ -195,8 +194,7 @@ final class IgnoredApplicationsStore {
         _ requestKinds: Set<AuthenticationRequestKind>,
         for identifier: String
     ) {
-        guard !requestKinds.isEmpty,
-              let index = rules.firstIndex(where: { $0.identifier == identifier }) else {
+        guard let index = rules.firstIndex(where: { $0.identifier == identifier }) else {
             return
         }
         let current = rules[index]
@@ -237,7 +235,6 @@ final class IgnoredApplicationsStore {
 
         var identifiers: Set<String> = []
         return decoded
-            .filter { !$0.requestKinds.isEmpty }
             .filter { identifiers.insert($0.identifier).inserted }
             .sorted {
                 $0.displayName.localizedStandardCompare($1.displayName) == .orderedAscending

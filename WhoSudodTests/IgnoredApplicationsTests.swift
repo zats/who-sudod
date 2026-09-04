@@ -3,14 +3,18 @@ import XCTest
 @testable import WhoSudod
 
 final class IgnoredApplicationsTests: XCTestCase {
-    func testDialogSummaryUsesAllDialogsOrSelectedNames() {
+    func testDialogSummaryListsOnlyDialogsThatRemainVisible() {
         XCTAssertEqual(
             IgnoredApplicationRuleSorter.summary(Set(AuthenticationRequestKind.allCases)),
-            "All dialogs"
+            "None"
         )
         XCTAssertEqual(
-            IgnoredApplicationRuleSorter.summary([.sudo, .localAuthentication]),
+            IgnoredApplicationRuleSorter.summary([.authorization]),
             "Sudo, Local Authentication"
+        )
+        XCTAssertEqual(
+            IgnoredApplicationRuleSorter.summary([]),
+            "Sudo, Administrator access, Local Authentication"
         )
     }
 
@@ -25,7 +29,7 @@ final class IgnoredApplicationsTests: XCTestCase {
                 by: .dialogs,
                 ascending: true
             ).map(\.displayName),
-            ["Gamma", "Alpha", "Beta"]
+            ["Alpha", "Beta", "Gamma"]
         )
         XCTAssertEqual(
             IgnoredApplicationRuleSorter.sorted(
@@ -33,7 +37,7 @@ final class IgnoredApplicationsTests: XCTestCase {
                 by: .dialogs,
                 ascending: false
             ).map(\.displayName),
-            ["Alpha", "Beta", "Gamma"]
+            ["Gamma", "Alpha", "Beta"]
         )
     }
 
@@ -85,6 +89,26 @@ final class IgnoredApplicationsTests: XCTestCase {
         XCTAssertEqual(restored.rules.count, 1)
         XCTAssertEqual(restored.rules[0].bundleIdentifier, "com.example.ignored")
         XCTAssertEqual(restored.rules[0].requestKinds, [.sudo, .localAuthentication])
+    }
+
+    @MainActor
+    func testStoreKeepsApplicationWhenEveryDialogTypeIsShown() throws {
+        let suiteName = "IgnoredApplicationsVisibleTypesTests-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let application = try makeApplication(
+            name: "Visible",
+            bundleIdentifier: "com.example.visible"
+        )
+        defer { try? FileManager.default.removeItem(at: application.root) }
+
+        let store = IgnoredApplicationsStore(defaults: defaults, defaultApplicationURLs: [])
+        let rule = try XCTUnwrap(store.addApplication(at: application.bundle))
+        store.setRequestKinds([], for: rule.identifier)
+
+        let restored = IgnoredApplicationsStore(defaults: defaults, defaultApplicationURLs: [])
+        XCTAssertEqual(restored.rules.count, 1)
+        XCTAssertEqual(restored.rules[0].requestKinds, [])
     }
 
     @MainActor

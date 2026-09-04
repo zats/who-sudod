@@ -43,7 +43,7 @@ final class IgnoredApplicationsSettingsViewController: NSViewController,
         view = root
 
         let explanation = NSTextField(
-            wrappingLabelWithString: "Who Sudo'd does not show a process tree when an application makes one of its selected authentication requests."
+            wrappingLabelWithString: "Who Sudo’d appears for checked dialogs."
         )
         explanation.translatesAutoresizingMaskIntoConstraints = false
         explanation.isSelectable = false
@@ -65,7 +65,8 @@ final class IgnoredApplicationsSettingsViewController: NSViewController,
         let dialogsColumn = NSTableColumn(
             identifier: NSUserInterfaceItemIdentifier(IgnoredApplicationsSortColumn.dialogs.rawValue)
         )
-        dialogsColumn.title = "Ignored Dialogs"
+        dialogsColumn.title = "Show For"
+        dialogsColumn.headerToolTip = "Who Sudo’d appears for checked dialogs."
         dialogsColumn.minWidth = 175
         dialogsColumn.width = 200
         dialogsColumn.resizingMask = .userResizingMask
@@ -220,9 +221,9 @@ final class IgnoredApplicationsSettingsViewController: NSViewController,
             )
             return cell
         case IgnoredApplicationsSortColumn.dialogs.rawValue:
-            let cell = IgnoredDialogsCellView()
-            cell.configure(requestKinds: rule.requestKinds) { [weak self] requestKinds in
-                self?.setRequestKinds(requestKinds, for: rule.identifier)
+            let cell = DisplayedDialogsCellView()
+            cell.configure(ignoredRequestKinds: rule.requestKinds) { [weak self] ignoredKinds in
+                self?.setRequestKinds(ignoredKinds, for: rule.identifier)
             }
             return cell
         default:
@@ -253,7 +254,7 @@ final class IgnoredApplicationsSettingsViewController: NSViewController,
         let panel = NSOpenPanel()
         panel.title = "Choose Applications to Ignore"
         panel.prompt = "Ignore"
-        panel.message = "Select one or more applications. All authentication types are selected by default."
+        panel.message = "New apps are hidden for all dialog types."
         panel.allowedContentTypes = [.application]
         panel.allowsMultipleSelection = true
         panel.canChooseFiles = true
@@ -401,12 +402,19 @@ enum IgnoredApplicationsSortColumn: String {
 }
 
 enum IgnoredApplicationRuleSorter {
-    static func summary(_ requestKinds: Set<AuthenticationRequestKind>) -> String {
-        if requestKinds == Set(AuthenticationRequestKind.allCases) {
-            return "All dialogs"
+    static func displayedRequestKinds(
+        for ignoredRequestKinds: Set<AuthenticationRequestKind>
+    ) -> Set<AuthenticationRequestKind> {
+        Set(AuthenticationRequestKind.allCases).subtracting(ignoredRequestKinds)
+    }
+
+    static func summary(_ ignoredRequestKinds: Set<AuthenticationRequestKind>) -> String {
+        let displayedKinds = displayedRequestKinds(for: ignoredRequestKinds)
+        guard !displayedKinds.isEmpty else {
+            return "None"
         }
         return AuthenticationRequestKind.settingsOrder.compactMap { kind in
-            requestKinds.contains(kind) ? kind.settingsDisplayName : nil
+            displayedKinds.contains(kind) ? kind.settingsDisplayName : nil
         }.joined(separator: ", ")
     }
 
@@ -461,7 +469,7 @@ private final class IgnoredApplicationCellView: NSTableCellView {
         textField = nameLabel
 
         NSLayoutConstraint.activate([
-            applicationIcon.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 10),
+            applicationIcon.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 0),
             applicationIcon.centerYAnchor.constraint(equalTo: centerYAnchor),
             applicationIcon.widthAnchor.constraint(equalToConstant: 30),
             applicationIcon.heightAnchor.constraint(equalToConstant: 30),
@@ -486,10 +494,10 @@ private final class IgnoredApplicationCellView: NSTableCellView {
 }
 
 @MainActor
-private final class IgnoredDialogsCellView: NSTableCellView, NSMenuDelegate {
+private final class DisplayedDialogsCellView: NSTableCellView, NSMenuDelegate {
     private let popUpButton = NSPopUpButton(frame: .zero, pullsDown: false)
     private var summaryItem: NSMenuItem?
-    private var requestKinds = Set<AuthenticationRequestKind>()
+    private var ignoredRequestKinds = Set<AuthenticationRequestKind>()
     private var didChange: ((Set<AuthenticationRequestKind>) -> Void)?
 
     override init(frame frameRect: NSRect) {
@@ -503,7 +511,7 @@ private final class IgnoredDialogsCellView: NSTableCellView, NSMenuDelegate {
         addSubview(popUpButton)
 
         NSLayoutConstraint.activate([
-            popUpButton.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 10),
+            popUpButton.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 0),
             popUpButton.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -20),
             popUpButton.centerYAnchor.constraint(equalTo: centerYAnchor),
             popUpButton.heightAnchor.constraint(equalToConstant: 30)
@@ -516,10 +524,10 @@ private final class IgnoredDialogsCellView: NSTableCellView, NSMenuDelegate {
     }
 
     func configure(
-        requestKinds: Set<AuthenticationRequestKind>,
+        ignoredRequestKinds: Set<AuthenticationRequestKind>,
         didChange: @escaping (Set<AuthenticationRequestKind>) -> Void
     ) {
-        self.requestKinds = requestKinds
+        self.ignoredRequestKinds = ignoredRequestKinds
         self.didChange = didChange
         rebuildMenu()
     }
@@ -543,7 +551,10 @@ private final class IgnoredDialogsCellView: NSTableCellView, NSMenuDelegate {
         menu.delegate = self
         menu.autoenablesItems = false
 
-        let summary = IgnoredApplicationRuleSorter.summary(requestKinds)
+        let displayedKinds = IgnoredApplicationRuleSorter.displayedRequestKinds(
+            for: ignoredRequestKinds
+        )
+        let summary = IgnoredApplicationRuleSorter.summary(ignoredRequestKinds)
         let summaryItem = NSMenuItem(
             title: summary,
             action: nil,
@@ -560,13 +571,13 @@ private final class IgnoredDialogsCellView: NSTableCellView, NSMenuDelegate {
             )
             item.target = self
             item.representedObject = kind.rawValue
-            item.state = requestKinds.contains(kind) ? .on : .off
+            item.state = displayedKinds.contains(kind) ? .on : .off
             menu.addItem(item)
         }
 
         popUpButton.select(summaryItem)
         popUpButton.toolTip = summary
-        popUpButton.setAccessibilityLabel("Ignored dialogs")
+        popUpButton.setAccessibilityLabel("Dialogs to show")
         popUpButton.setAccessibilityValue(summary)
     }
 
@@ -576,21 +587,17 @@ private final class IgnoredDialogsCellView: NSTableCellView, NSMenuDelegate {
               let kind = AuthenticationRequestKind(rawValue: rawValue) else {
             return
         }
-        var updated = requestKinds
+        var updated = ignoredRequestKinds
         if updated.contains(kind) {
             updated.remove(kind)
         } else {
             updated.insert(kind)
         }
-        guard !updated.isEmpty else {
-            NSSound.beep()
-            return
-        }
         apply(updated)
     }
 
     private func apply(_ updated: Set<AuthenticationRequestKind>) {
-        requestKinds = updated
+        ignoredRequestKinds = updated
         didChange?(updated)
     }
 }
