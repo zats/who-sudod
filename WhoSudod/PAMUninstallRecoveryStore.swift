@@ -13,9 +13,9 @@ enum PAMUninstallRecoveryStoreError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .invalidValue:
-            "The PAM removal recovery file contains an invalid value."
+            "The PAM change recovery file contains an invalid value."
         case .writeFailed(let detail):
-            "The PAM removal recovery state could not be saved. \(detail)"
+            "The PAM change recovery state could not be saved. \(detail)"
         }
     }
 }

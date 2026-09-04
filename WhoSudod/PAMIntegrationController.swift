@@ -6,7 +6,7 @@ private enum PAMLocalInspectionError: LocalizedError {
 
     var errorDescription: String? {
         switch self {
-        case .unsafePath(let path):
+        case let .unsafePath(path):
             "The PAM installation has unsafe access controls at \(path)."
         }
     }
@@ -17,6 +17,7 @@ struct PAMIntegrationSnapshot: Equatable, Sendable {
     let helper: PAMHelperServiceState
     let operationError: String?
     let uninstallRecoveryPhase: PAMUninstallRecoveryPhase
+    let operationInProgress: Bool
 
     var uninstallPending: Bool {
         uninstallRecoveryPhase == .uninstallPending
@@ -26,16 +27,22 @@ struct PAMIntegrationSnapshot: Equatable, Sendable {
         uninstallRecoveryPhase == .helperCleanupRequired
     }
 
+    var mutationOutcomeUnknown: Bool {
+        uninstallRecoveryPhase.unknownMutation != nil
+    }
+
     init(
         integration: PAMIntegrationInspection,
         helper: PAMHelperServiceState,
         operationError: String?,
-        uninstallRecoveryPhase: PAMUninstallRecoveryPhase = .none
+        uninstallRecoveryPhase: PAMUninstallRecoveryPhase = .none,
+        operationInProgress: Bool = false
     ) {
         self.integration = integration
         self.helper = helper
         self.operationError = operationError
         self.uninstallRecoveryPhase = uninstallRecoveryPhase
+        self.operationInProgress = operationInProgress
     }
 }
 
@@ -43,6 +50,24 @@ enum PAMUninstallRecoveryPhase: String, Equatable, Sendable {
     case none
     case uninstallPending
     case helperCleanupRequired
+    case installOutcomeUnknown
+    case uninstallOutcomeUnknown
+
+    fileprivate var unknownMutation: PAMUnknownMutation? {
+        switch self {
+        case .installOutcomeUnknown:
+            .install
+        case .uninstallOutcomeUnknown:
+            .uninstall
+        case .none, .uninstallPending, .helperCleanupRequired:
+            nil
+        }
+    }
+}
+
+private enum PAMUnknownMutation: Equatable, Sendable {
+    case install
+    case uninstall
 }
 
 @MainActor
@@ -54,6 +79,7 @@ final class PAMIntegrationController {
     private let authorizer: PAMOperationAuthorizing
     private let recoveryStore: PAMUninstallRecoveryStoring
     private let localInspectionOverride: (() -> PAMIntegrationInspection)?
+    private let mutationReplyTimeout: Duration
     private var recoveryPhase: PAMUninstallRecoveryPhase
     private var operationIsInFlight = false
     private var stateRevision: UInt64 = 0
@@ -61,6 +87,7 @@ final class PAMIntegrationController {
     private(set) var snapshot: PAMIntegrationSnapshot {
         didSet { didChange?(snapshot) }
     }
+
     private(set) var hasCompletedRefresh = false
     var didChange: ((PAMIntegrationSnapshot) -> Void)?
 
@@ -71,10 +98,13 @@ final class PAMIntegrationController {
         systemAdministrationAccess: PAMSystemAdministrationAccessAuthorizing? = nil,
         authorizer: PAMOperationAuthorizing? = nil,
         recoveryStore: PAMUninstallRecoveryStoring? = nil,
-        localInspection: (() -> PAMIntegrationInspection)? = nil
+        localInspection: (() -> PAMIntegrationInspection)? = nil,
+        mutationReplyTimeout: Duration = .seconds(5)
     ) {
         self.bundleURL = bundleURL.standardizedFileURL
-        let service = service ?? SystemPAMHelperServiceController()
+        let service = service ?? SystemPAMHelperServiceController(
+            applicationBundleURL: bundleURL
+        )
         self.service = service
         self.helper = helper ?? SystemPAMHelperClient(applicationBundleURL: bundleURL)
         self.systemAdministrationAccess = systemAdministrationAccess
@@ -83,6 +113,7 @@ final class PAMIntegrationController {
         let recoveryStore = recoveryStore ?? FilePAMUninstallRecoveryStore()
         self.recoveryStore = recoveryStore
         localInspectionOverride = localInspection
+        self.mutationReplyTimeout = mutationReplyTimeout
         let helperState = service.state
         var initialOperationError: String?
         var recoveryPhase: PAMUninstallRecoveryPhase
@@ -93,7 +124,8 @@ final class PAMIntegrationController {
             initialOperationError = error.localizedDescription
         }
         if helperState == .notRegistered,
-           recoveryPhase == .helperCleanupRequired {
+           recoveryPhase == .helperCleanupRequired
+        {
             do {
                 try recoveryStore.save(.none)
                 recoveryPhase = .none
@@ -106,14 +138,33 @@ final class PAMIntegrationController {
             integration: PAMIntegrationInspection(state: .notInstalled, detail: nil),
             helper: helperState,
             operationError: initialOperationError,
-            uninstallRecoveryPhase: recoveryPhase
+            uninstallRecoveryPhase: recoveryPhase,
+            operationInProgress: false
         )
     }
 
-    func refresh() {
+    @discardableResult
+    func refresh() -> Bool {
         guard !operationIsInFlight else {
-            return
+            return false
         }
+        if recoveryPhase.unknownMutation != nil {
+            stateRevision &+= 1
+            hasCompletedRefresh = true
+            snapshot = PAMIntegrationSnapshot(
+                integration: localInspection(),
+                helper: service.state,
+                operationError: snapshot.operationError
+                    ?? "The previous PAM change could not be confirmed. Retry it safely.",
+                uninstallRecoveryPhase: storedRecoveryPhase()
+            )
+            return true
+        }
+        startRefresh()
+        return true
+    }
+
+    private func startRefresh() {
         stateRevision &+= 1
         let revision = stateRevision
         let helperState = service.state
@@ -136,80 +187,52 @@ final class PAMIntegrationController {
         helper.preflight { [weak self] result in
             guard let self,
                   stateRevision == revision,
-                  !operationIsInFlight else {
+                  !operationIsInFlight
+            else {
                 return
             }
             switch result {
-            case .success(let identity):
+            case let .success(identity):
                 helper.status(expectedBuildIdentity: identity) { [weak self] code, detail in
                     guard let self,
                           stateRevision == revision,
-                          !operationIsInFlight else {
+                          !operationIsInFlight
+                    else {
                         return
                     }
                     hasCompletedRefresh = true
                     acceptRemoteState(code: code, detail: detail)
                 }
-            case .failure(let error):
-                let integration = localInspection()
-                let recovery = reconcileRecoveryPhase(
-                    for: integration,
-                    helperState: service.state
-                )
-                hasCompletedRefresh = true
-                snapshot = PAMIntegrationSnapshot(
-                    integration: integration,
-                    helper: service.state,
-                    operationError: recovery.operationError ?? error.localizedDescription,
-                    uninstallRecoveryPhase: recovery.phase
-                )
+            case let .failure(error):
+                completeRefresh(with: error.localizedDescription)
             }
         }
+    }
+
+    private func completeRefresh(with operationError: String) {
+        let integration = localInspection()
+        let recovery = reconcileRecoveryPhase(
+            for: integration,
+            helperState: service.state
+        )
+        hasCompletedRefresh = true
+        snapshot = PAMIntegrationSnapshot(
+            integration: integration,
+            helper: service.state,
+            operationError: recovery.operationError ?? operationError,
+            uninstallRecoveryPhase: recovery.phase
+        )
     }
 
     func install() {
-        guard beginOperation() else {
-            return
-        }
-        guard requestSystemAdministrationAccess() else {
+        guard beginOperation(for: .install) else {
             return
         }
         prepareHelperForMutation { [weak self] identity in
             guard let self else {
                 return
             }
-            guard let authorization = requestAuthorization() else {
-                finishOperation()
-                return
-            }
-
-            helper.install(
-                authorization: authorization,
-                expectedBuildIdentity: identity
-            ) { [weak self] result in
-                guard let self else {
-                    return
-                }
-                finishOperation()
-                acceptInstallResult(result)
-            }
-        }
-    }
-
-    func uninstall() {
-        guard beginOperation() else {
-            return
-        }
-        let local = localInspection()
-        if local.state == .notInstalled {
-            unregisterHelperIfNeeded(integration: local)
-            return
-        }
-        guard requestSystemAdministrationAccess() else {
-            return
-        }
-        prepareHelperForMutation { [weak self] identity in
-            guard let self else {
+            guard requestSystemAdministrationAccess() else {
                 return
             }
             guard let authorization = requestAuthorization() else {
@@ -218,27 +241,92 @@ final class PAMIntegrationController {
             }
 
             do {
-                try setRecoveryPhase(.uninstallPending, forcePersistence: true)
+                try setRecoveryPhase(.installOutcomeUnknown, forcePersistence: true)
             } catch {
                 stopOperation(with: error.localizedDescription)
                 return
             }
+            publishOperationInProgress()
+            let revision = stateRevision
+
+            helper.install(
+                authorization: authorization,
+                expectedBuildIdentity: identity
+            ) { [weak self] result in
+                guard let self,
+                      acceptsMutationReply(.install, revision: revision)
+                else {
+                    return
+                }
+                operationIsInFlight = true
+                acceptInstallResult(result)
+            }
+            scheduleMutationReplyWatchdog(
+                .install,
+                revision: revision
+            )
+        }
+    }
+
+    func uninstall() {
+        guard beginOperation(for: .uninstall) else {
+            return
+        }
+        let local = localInspection()
+        if local.state == .notInstalled {
+            unregisterHelperIfNeeded(integration: local)
+            return
+        }
+        prepareHelperForMutation { [weak self] identity in
+            guard let self else {
+                return
+            }
+            guard requestSystemAdministrationAccess() else {
+                return
+            }
+            guard let authorization = requestAuthorization() else {
+                finishOperation()
+                return
+            }
+
+            do {
+                try setRecoveryPhase(.uninstallOutcomeUnknown, forcePersistence: true)
+            } catch {
+                stopOperation(with: error.localizedDescription)
+                return
+            }
+            publishOperationInProgress()
+            let revision = stateRevision
             helper.uninstall(
                 authorization: authorization,
                 expectedBuildIdentity: identity
             ) { [weak self] result in
-                guard let self else {
+                guard let self,
+                      acceptsMutationReply(.uninstall, revision: revision)
+                else {
+                    return
+                }
+                operationIsInFlight = true
+                guard result.inspection != nil else {
+                    pauseUnknownOutcome(
+                        with: result.operationError
+                            ?? "The PAM helper did not confirm the removal. Retry it safely."
+                    )
                     return
                 }
                 guard result.operationError == nil,
                       let integration = result.inspection,
-                      integration.state == .notInstalled else {
-                    finishOperation()
+                      integration.state == .notInstalled
+                else {
                     acceptUninstallFailure(result)
                     return
                 }
                 unregisterHelperIfNeeded(integration: integration)
             }
+            scheduleMutationReplyWatchdog(
+                .uninstall,
+                revision: revision
+            )
         }
     }
 
@@ -274,18 +362,39 @@ final class PAMIntegrationController {
         unregisterHelperIfNeeded(integration: local)
     }
 
-    private func beginOperation() -> Bool {
+    private func beginOperation(for mutation: PAMUnknownMutation? = nil) -> Bool {
         guard !operationIsInFlight else {
+            return false
+        }
+        if let unknownMutation = recoveryPhase.unknownMutation,
+           unknownMutation != mutation
+        {
             return false
         }
         operationIsInFlight = true
         stateRevision &+= 1
-        clearOperationError()
+        publishOperationInProgress()
         return true
     }
 
     private func finishOperation() {
         operationIsInFlight = false
+        snapshot = PAMIntegrationSnapshot(
+            integration: snapshot.integration,
+            helper: service.state,
+            operationError: snapshot.operationError,
+            uninstallRecoveryPhase: storedRecoveryPhase()
+        )
+    }
+
+    private func publishOperationInProgress() {
+        snapshot = PAMIntegrationSnapshot(
+            integration: snapshot.integration,
+            helper: service.state,
+            operationError: nil,
+            uninstallRecoveryPhase: storedRecoveryPhase(),
+            operationInProgress: true
+        )
     }
 
     private func prepareHelperForMutation(
@@ -342,9 +451,9 @@ final class PAMIntegrationController {
                 return
             }
             switch result {
-            case .success(let identity):
+            case let .success(identity):
                 completion(identity)
-            case .failure(let error):
+            case let .failure(error):
                 guard error.allowsServiceRecovery, !recoveryAttempted else {
                     stopOperation(with: error.localizedDescription)
                     return
@@ -404,6 +513,45 @@ final class PAMIntegrationController {
         }
     }
 
+    private func scheduleMutationReplyWatchdog(
+        _ mutation: PAMUnknownMutation,
+        revision: UInt64
+    ) {
+        let timeout = mutationReplyTimeout
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(for: timeout)
+            guard let self,
+                  operationIsInFlight,
+                  stateRevision == revision,
+                  storedRecoveryPhase().unknownMutation == mutation
+            else {
+                return
+            }
+            pauseUnknownOutcome(
+                with: "The PAM helper is still finishing. Retry the same change safely."
+            )
+        }
+    }
+
+    private func acceptsMutationReply(
+        _ mutation: PAMUnknownMutation,
+        revision: UInt64
+    ) -> Bool {
+        stateRevision == revision
+            && storedRecoveryPhase().unknownMutation == mutation
+    }
+
+    private func pauseUnknownOutcome(with operationError: String) {
+        hasCompletedRefresh = true
+        finishOperation()
+        snapshot = PAMIntegrationSnapshot(
+            integration: localInspection(),
+            helper: service.state,
+            operationError: operationError,
+            uninstallRecoveryPhase: storedRecoveryPhase()
+        )
+    }
+
     private func localInspection() -> PAMIntegrationInspection {
         if let localInspectionOverride {
             return localInspectionOverride()
@@ -428,10 +576,11 @@ final class PAMIntegrationController {
                 contentsOf: modulePayloadURL,
                 options: .mappedIfSafe
             ),
-            let terminalReaderPayload = try? Data(
-                contentsOf: terminalReaderPayloadURL,
-                options: .mappedIfSafe
-            ) else {
+                let terminalReaderPayload = try? Data(
+                    contentsOf: terminalReaderPayloadURL,
+                    options: .mappedIfSafe
+                )
+            else {
                 return PAMIntegrationInspection(
                     state: .unsupported,
                     detail: "A bundled PAM component is missing."
@@ -462,7 +611,8 @@ final class PAMIntegrationController {
               pathMetadata.st_uid == 0,
               pathMetadata.st_gid == 0,
               pathMetadata.st_nlink == 1,
-              pathMetadata.st_mode & mode_t(0o777) == mode_t(0o555) else {
+              pathMetadata.st_mode & mode_t(0o777) == mode_t(0o555)
+        else {
             throw PAMLocalInspectionError.unsafePath(path)
         }
 
@@ -474,13 +624,14 @@ final class PAMIntegrationController {
         var descriptorMetadata = stat()
         guard fstat(descriptor, &descriptorMetadata) == 0,
               descriptorMetadata.st_dev == pathMetadata.st_dev,
-              descriptorMetadata.st_ino == pathMetadata.st_ino else {
+              descriptorMetadata.st_ino == pathMetadata.st_ino
+        else {
             throw CocoaError(.fileReadUnknown)
         }
         try requireNoExtendedACL(fd: descriptor, path: path)
 
         var data = Data()
-        var buffer = [UInt8](repeating: 0, count: 16_384)
+        var buffer = [UInt8](repeating: 0, count: 16384)
         while true {
             let count = Darwin.read(descriptor, &buffer, buffer.count)
             if count == 0 {
@@ -508,7 +659,8 @@ final class PAMIntegrationController {
                   metadata.st_mode & S_IFMT == S_IFDIR,
                   metadata.st_uid == 0,
                   metadata.st_gid == 0,
-                  metadata.st_mode & mode_t(0o7777) == mode_t(0o755) else {
+                  metadata.st_mode & mode_t(0o7777) == mode_t(0o755)
+            else {
                 throw PAMLocalInspectionError.unsafePath(path)
             }
             try requireNoExtendedACL(path: path)
@@ -575,20 +727,19 @@ final class PAMIntegrationController {
 
     private func acceptInstallResult(_ result: PAMHelperMutationResult) {
         guard let inspection = result.inspection else {
-            updateOperationError(
-                result.operationError ?? "The PAM helper did not complete the request.",
-                preserving: localInspection()
+            pauseUnknownOutcome(
+                with: result.operationError
+                    ?? "The PAM helper did not confirm the installation. Retry it safely."
             )
             return
         }
         var operationError = result.operationError
-        if operationError == nil, inspection.state == .installed {
-            do {
-                try setRecoveryPhase(.none)
-            } catch {
-                operationError = error.localizedDescription
-            }
+        do {
+            try setRecoveryPhase(.none)
+        } catch {
+            operationError = error.localizedDescription
         }
+        finishOperation()
         snapshot = PAMIntegrationSnapshot(
             integration: inspection,
             helper: service.state,
@@ -599,12 +750,19 @@ final class PAMIntegrationController {
 
     private func acceptUninstallFailure(_ result: PAMHelperMutationResult) {
         let integration = result.inspection ?? localInspection()
+        var operationError = result.operationError
+            ?? "PAM removal did not complete. Try again."
+        do {
+            try setRecoveryPhase(.uninstallPending)
+        } catch {
+            operationError = error.localizedDescription
+        }
+        finishOperation()
         snapshot = PAMIntegrationSnapshot(
             integration: integration,
             helper: service.state,
-            operationError: result.operationError
-                ?? "PAM removal did not complete. Try again.",
-            uninstallRecoveryPhase: .uninstallPending
+            operationError: operationError,
+            uninstallRecoveryPhase: storedRecoveryPhase()
         )
     }
 
@@ -647,7 +805,8 @@ final class PAMIntegrationController {
             integration: integration,
             helper: service.state,
             operationError: nil,
-            uninstallRecoveryPhase: .helperCleanupRequired
+            uninstallRecoveryPhase: .helperCleanupRequired,
+            operationInProgress: true
         )
         service.unregister { [weak self] errorMessage in
             guard let self, operationIsInFlight else {
@@ -710,6 +869,8 @@ final class PAMIntegrationController {
             } else {
                 resolvedPhase = .uninstallPending
             }
+        case .installOutcomeUnknown, .uninstallOutcomeUnknown:
+            resolvedPhase = phase
         }
         do {
             try setRecoveryPhase(resolvedPhase)
@@ -739,7 +900,8 @@ final class PAMIntegrationController {
             integration: snapshot.integration,
             helper: service.state,
             operationError: nil,
-            uninstallRecoveryPhase: snapshot.uninstallRecoveryPhase
+            uninstallRecoveryPhase: storedRecoveryPhase(),
+            operationInProgress: operationIsInFlight
         )
     }
 
@@ -751,7 +913,8 @@ final class PAMIntegrationController {
             integration: integration ?? localInspection(),
             helper: service.state,
             operationError: message,
-            uninstallRecoveryPhase: snapshot.uninstallRecoveryPhase
+            uninstallRecoveryPhase: storedRecoveryPhase(),
+            operationInProgress: operationIsInFlight
         )
     }
 

@@ -15,5 +15,7 @@
     <array>
         <string>com.zats.WhoSudo</string>
     </array>
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
 </dict>
 </plist>

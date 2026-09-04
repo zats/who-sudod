@@ -24,8 +24,8 @@ settings:
     CODE_SIGN_STYLE: Automatic
     ENABLE_HARDENED_RUNTIME: YES
     ENABLE_APP_SANDBOX: NO
-    MARKETING_VERSION: 1.2.0
-    CURRENT_PROJECT_VERSION: 3
+    MARKETING_VERSION: 1.2.1
+    CURRENT_PROJECT_VERSION: 5
 
 targets:
   WhoSudod:
@@ -90,6 +90,7 @@ targets:
       - path: WhoSudodPAMInstaller/PAMOperationAuthorization.swift
       - path: WhoSudodPAMInstaller/PAMInstallerMutationAuthorizationGate.swift
       - path: WhoSudodPAMInstaller/PAMInstallerClientAuditSession.swift
+      - path: WhoSudodPAMInstaller/PAMInstallerLifecycle.swift
     dependencies:
       - target: WhoSudod
       - sdk: libbsm.tbd
@@ -130,6 +131,8 @@ targets:
         GENERATE_INFOPLIST_FILE: YES
         CREATE_INFOPLIST_SECTION_IN_BINARY: YES
         CODE_SIGN_INJECT_BASE_ENTITLEMENTS: NO
+        ENTITLEMENTS_ALLOWED: NO
+        ENTITLEMENTS_REQUIRED: NO
         INFOPLIST_KEY_NSSystemAdministrationUsageDescription: "Who Sudo'd installs or removes its optional sudo password input."
         SWIFT_OBJC_BRIDGING_HEADER: "$(SRCROOT)/WhoSudodPAMInstaller/WhoSudodPAMInstaller-Bridging-Header.h"
     dependencies:

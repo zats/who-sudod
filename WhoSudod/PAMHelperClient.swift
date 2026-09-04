@@ -56,6 +56,9 @@ protocol PAMHelperCalling: AnyObject {
 
 @MainActor
 final class SystemPAMHelperClient: PAMHelperCalling {
+    private static let replyTimeout: TimeInterval = 3
+    private static let replyTimeoutDetail = "The PAM helper did not reply within three seconds."
+
     private let applicationBundleURL: URL
 
     init(applicationBundleURL: URL = Bundle.main.bundleURL) {
@@ -80,24 +83,14 @@ final class SystemPAMHelperClient: PAMHelperCalling {
             return
         }
 
-        callIdentity(signingRequirement: exactHelperRequirement, reply: reply) { proxy, finish in
-            proxy.buildIdentity { token, detail in
-                guard let token else {
-                    finish(
-                        .failure(
-                            .serviceUnavailable(
-                                detail ?? "The PAM helper could not report its build identity."
-                            )
-                        )
-                    )
-                    return
-                }
-                guard token == expectedIdentity.token else {
-                    finish(.failure(.identityMismatch))
-                    return
-                }
-                finish(.success(expectedIdentity))
-            }
+        callIdentity(signingRequirement: exactHelperRequirement, reply: reply) {
+            proxy,
+            completion in
+            proxy.buildIdentity(
+                reply: completion.buildIdentityReplyHandler(
+                    expectedIdentity: expectedIdentity
+                )
+            )
         }
     }
 
@@ -112,10 +105,11 @@ final class SystemPAMHelperClient: PAMHelperCalling {
             reply(PAMHelperReplyCode.transportFailure, error.localizedDescription)
             return
         }
-        call(signingRequirement: signingRequirement, reply: reply) { proxy, finish in
-            proxy.status { code, detail in
-                finish(code, detail)
-            }
+        call(
+            signingRequirement: signingRequirement,
+            reply: reply
+        ) { proxy, completion in
+            proxy.status(reply: completion.statusReplyHandler())
         }
     }
 
@@ -135,17 +129,12 @@ final class SystemPAMHelperClient: PAMHelperCalling {
             signingRequirement: signingRequirement,
             reply: reply,
             retaining: authorization
-        ) { proxy, finish in
+        ) { proxy, completion in
             proxy.install(
                 authorization: authorization.externalFormData,
-                expectedBuildIdentity: expectedBuildIdentity.token
-            ) { code, detail, operationError in
-                finish(Self.mutationResult(
-                    code: code,
-                    detail: detail,
-                    operationError: operationError
-                ))
-            }
+                expectedBuildIdentity: expectedBuildIdentity.token,
+                reply: completion.mutationReplyHandler()
+            )
         }
     }
 
@@ -165,32 +154,13 @@ final class SystemPAMHelperClient: PAMHelperCalling {
             signingRequirement: signingRequirement,
             reply: reply,
             retaining: authorization
-        ) { proxy, finish in
+        ) { proxy, completion in
             proxy.uninstall(
                 authorization: authorization.externalFormData,
-                expectedBuildIdentity: expectedBuildIdentity.token
-            ) { code, detail, operationError in
-                finish(Self.mutationResult(
-                    code: code,
-                    detail: detail,
-                    operationError: operationError
-                ))
-            }
+                expectedBuildIdentity: expectedBuildIdentity.token,
+                reply: completion.mutationReplyHandler()
+            )
         }
-    }
-
-    private static func mutationResult(
-        code: Int,
-        detail: String?,
-        operationError: String?
-    ) -> PAMHelperMutationResult {
-        guard let state = PAMIntegrationStateCode(rawValue: code) else {
-            return .transportFailure("The PAM helper returned an unknown state.")
-        }
-        return PAMHelperMutationResult(
-            inspection: PAMIntegrationInspection(state: state, detail: detail),
-            operationError: operationError
-        )
     }
 
     private func callIdentity(
@@ -198,30 +168,26 @@ final class SystemPAMHelperClient: PAMHelperCalling {
         reply: @escaping (Result<PAMHelperBuildIdentity, PAMHelperPreflightError>) -> Void,
         body: (
             PAMInstallerXPCProtocol,
-            @escaping (Result<PAMHelperBuildIdentity, PAMHelperPreflightError>) -> Void
+            PAMHelperIdentityReply
         ) -> Void
     ) {
         let connection = connection(signingRequirement: signingRequirement)
         let completion = PAMHelperIdentityReply(connection: connection, reply: reply)
-        connection.interruptionHandler = {
-            completion.finish(
-                .failure(.serviceUnavailable("The PAM helper stopped before it replied."))
-            )
-        }
-        connection.invalidationHandler = {
-            completion.finish(
-                .failure(
-                    .serviceUnavailable(
-                        "The PAM helper connection closed before it replied."
-                    )
-                )
-            )
-        }
+        completion.failIfPending(
+            after: Self.replyTimeout,
+            detail: Self.replyTimeoutDetail
+        )
+        connection.interruptionHandler = completion.failureHandler(
+            detail: "The PAM helper stopped before it replied."
+        )
+        connection.invalidationHandler = completion.failureHandler(
+            detail: "The PAM helper connection closed before it replied."
+        )
         connection.activate()
 
-        guard let proxy = connection.remoteObjectProxyWithErrorHandler({ error in
-            completion.finish(.failure(.serviceUnavailable(error.localizedDescription)))
-        }) as? PAMInstallerXPCProtocol else {
+        guard let proxy = connection.remoteObjectProxyWithErrorHandler(
+            completion.errorHandler()
+        ) as? PAMInstallerXPCProtocol else {
             completion.finish(
                 .failure(
                     .serviceUnavailable(
@@ -231,7 +197,7 @@ final class SystemPAMHelperClient: PAMHelperCalling {
             )
             return
         }
-        body(proxy, completion.finish)
+        body(proxy, completion)
     }
 
     private func call(
@@ -240,7 +206,7 @@ final class SystemPAMHelperClient: PAMHelperCalling {
         retaining retainedObject: AnyObject? = nil,
         body: (
             PAMInstallerXPCProtocol,
-            @escaping (Int, String?) -> Void
+            PAMHelperReply
         ) -> Void
     ) {
         let connection = connection(signingRequirement: signingRequirement)
@@ -250,33 +216,28 @@ final class SystemPAMHelperClient: PAMHelperCalling {
             retainedObject: retainedObject,
             reply: reply
         )
-        connection.interruptionHandler = {
-            completion.finish(
-                PAMHelperReplyCode.transportFailure,
-                "The PAM helper stopped before it replied."
-            )
-        }
-        connection.invalidationHandler = {
-            completion.finish(
-                PAMHelperReplyCode.transportFailure,
-                "The PAM helper connection closed before it replied."
-            )
-        }
+        completion.failIfPending(
+            after: Self.replyTimeout,
+            detail: Self.replyTimeoutDetail
+        )
+        connection.interruptionHandler = completion.failureHandler(
+            detail: "The PAM helper stopped before it replied."
+        )
+        connection.invalidationHandler = completion.failureHandler(
+            detail: "The PAM helper connection closed before it replied."
+        )
         connection.activate()
 
-        guard let proxy = connection.remoteObjectProxyWithErrorHandler({ error in
-            completion.finish(
-                PAMHelperReplyCode.transportFailure,
-                error.localizedDescription
-            )
-        }) as? PAMInstallerXPCProtocol else {
+        guard let proxy = connection.remoteObjectProxyWithErrorHandler(
+            completion.errorHandler()
+        ) as? PAMInstallerXPCProtocol else {
             completion.finish(
                 PAMHelperReplyCode.transportFailure,
                 "The PAM helper did not provide the expected interface."
             )
             return
         }
-        body(proxy, completion.finish)
+        body(proxy, completion)
     }
 
     private func callMutation(
@@ -285,7 +246,7 @@ final class SystemPAMHelperClient: PAMHelperCalling {
         retaining retainedObject: AnyObject? = nil,
         body: (
             PAMInstallerXPCProtocol,
-            @escaping (PAMHelperMutationResult) -> Void
+            PAMHelperMutationReply
         ) -> Void
     ) {
         let connection = connection(signingRequirement: signingRequirement)
@@ -294,23 +255,17 @@ final class SystemPAMHelperClient: PAMHelperCalling {
             retainedObject: retainedObject,
             reply: reply
         )
-        connection.interruptionHandler = {
-            completion.finish(
-                .transportFailure("The PAM helper stopped before it replied.")
-            )
-        }
-        connection.invalidationHandler = {
-            completion.finish(
-                .transportFailure(
-                    "The PAM helper connection closed before it replied."
-                )
-            )
-        }
+        connection.interruptionHandler = completion.failureHandler(
+            detail: "The PAM helper stopped before it replied."
+        )
+        connection.invalidationHandler = completion.failureHandler(
+            detail: "The PAM helper connection closed before it replied."
+        )
         connection.activate()
 
-        guard let proxy = connection.remoteObjectProxyWithErrorHandler({ error in
-            completion.finish(.transportFailure(error.localizedDescription))
-        }) as? PAMInstallerXPCProtocol else {
+        guard let proxy = connection.remoteObjectProxyWithErrorHandler(
+            completion.errorHandler()
+        ) as? PAMInstallerXPCProtocol else {
             completion.finish(
                 .transportFailure(
                     "The PAM helper did not provide the expected interface."
@@ -318,7 +273,7 @@ final class SystemPAMHelperClient: PAMHelperCalling {
             )
             return
         }
-        body(proxy, completion.finish)
+        body(proxy, completion)
     }
 
     private func connection(signingRequirement: String) -> NSXPCConnection {
@@ -332,23 +287,78 @@ final class SystemPAMHelperClient: PAMHelperCalling {
     }
 }
 
-private final class PAMHelperIdentityReply: @unchecked Sendable {
+private final class PAMHelperConnectionReference: @unchecked Sendable {
+    private let value: NSXPCConnection
+
+    init(_ value: NSXPCConnection) {
+        self.value = value
+    }
+
+    @MainActor
+    func invalidate() {
+        value.invalidate()
+    }
+}
+
+final class PAMHelperIdentityReply: @unchecked Sendable {
     private let lock = NSLock()
-    private var connection: NSXPCConnection?
+    private var connection: PAMHelperConnectionReference?
     private var reply: ((Result<PAMHelperBuildIdentity, PAMHelperPreflightError>) -> Void)?
 
     init(
         connection: NSXPCConnection,
         reply: @escaping (Result<PAMHelperBuildIdentity, PAMHelperPreflightError>) -> Void
     ) {
-        self.connection = connection
+        self.connection = PAMHelperConnectionReference(connection)
         self.reply = reply
+    }
+
+    func failIfPending(after interval: TimeInterval, detail: String) {
+        DispatchQueue.global(qos: .userInitiated).asyncAfter(
+            deadline: .now() + interval
+        ) { [self] in
+            finish(.failure(.serviceUnavailable(detail)))
+        }
+    }
+
+    func failureHandler(detail: String) -> @Sendable () -> Void {
+        { [self] in
+            finish(.failure(.serviceUnavailable(detail)))
+        }
+    }
+
+    func errorHandler() -> @Sendable (Error) -> Void {
+        { [self] error in
+            finish(.failure(.serviceUnavailable(error.localizedDescription)))
+        }
+    }
+
+    func buildIdentityReplyHandler(
+        expectedIdentity: PAMHelperBuildIdentity
+    ) -> @Sendable (Data?, String?) -> Void {
+        { [self] token, detail in
+            guard let token else {
+                finish(
+                    .failure(
+                        .serviceUnavailable(
+                            detail ?? "The PAM helper could not report its build identity."
+                        )
+                    )
+                )
+                return
+            }
+            guard token == expectedIdentity.token else {
+                finish(.failure(.identityMismatch))
+                return
+            }
+            finish(.success(expectedIdentity))
+        }
     }
 
     func finish(_ result: Result<PAMHelperBuildIdentity, PAMHelperPreflightError>) {
         let values = lock.withLock {
             () -> (
-                NSXPCConnection,
+                PAMHelperConnectionReference,
                 (Result<PAMHelperBuildIdentity, PAMHelperPreflightError>) -> Void
             )? in
             guard let connection, let reply else {
@@ -361,16 +371,16 @@ private final class PAMHelperIdentityReply: @unchecked Sendable {
         guard let (connection, reply) = values else {
             return
         }
-        connection.invalidate()
         Task { @MainActor in
+            connection.invalidate()
             reply(result)
         }
     }
 }
 
-private final class PAMHelperReply: @unchecked Sendable {
+final class PAMHelperReply: @unchecked Sendable {
     private let lock = NSLock()
-    private var connection: NSXPCConnection?
+    private var connection: PAMHelperConnectionReference?
     private var retainedObject: AnyObject?
     private var reply: ((Int, String?) -> Void)?
 
@@ -379,13 +389,40 @@ private final class PAMHelperReply: @unchecked Sendable {
         retainedObject: AnyObject?,
         reply: @escaping (Int, String?) -> Void
     ) {
-        self.connection = connection
+        self.connection = PAMHelperConnectionReference(connection)
         self.retainedObject = retainedObject
         self.reply = reply
     }
 
+    func failIfPending(after interval: TimeInterval, detail: String) {
+        DispatchQueue.global(qos: .userInitiated).asyncAfter(
+            deadline: .now() + interval
+        ) { [self] in
+            finish(PAMHelperReplyCode.transportFailure, detail)
+        }
+    }
+
+    func failureHandler(detail: String) -> @Sendable () -> Void {
+        { [self] in
+            finish(PAMHelperReplyCode.transportFailure, detail)
+        }
+    }
+
+    func errorHandler() -> @Sendable (Error) -> Void {
+        { [self] error in
+            finish(PAMHelperReplyCode.transportFailure, error.localizedDescription)
+        }
+    }
+
+    func statusReplyHandler() -> @Sendable (Int, String?) -> Void {
+        { [self] code, detail in
+            finish(code, detail)
+        }
+    }
+
     func finish(_ code: Int, _ detail: String?) {
-        let values = lock.withLock { () -> (NSXPCConnection, (Int, String?) -> Void)? in
+        let values = lock.withLock {
+            () -> (PAMHelperConnectionReference, (Int, String?) -> Void)? in
             guard let connection, let reply else {
                 return nil
             }
@@ -397,16 +434,16 @@ private final class PAMHelperReply: @unchecked Sendable {
         guard let (connection, reply) = values else {
             return
         }
-        connection.invalidate()
         Task { @MainActor in
+            connection.invalidate()
             reply(code, detail)
         }
     }
 }
 
-private final class PAMHelperMutationReply: @unchecked Sendable {
+final class PAMHelperMutationReply: @unchecked Sendable {
     private let lock = NSLock()
-    private var connection: NSXPCConnection?
+    private var connection: PAMHelperConnectionReference?
     private var retainedObject: AnyObject?
     private var reply: ((PAMHelperMutationResult) -> Void)?
 
@@ -415,14 +452,51 @@ private final class PAMHelperMutationReply: @unchecked Sendable {
         retainedObject: AnyObject?,
         reply: @escaping (PAMHelperMutationResult) -> Void
     ) {
-        self.connection = connection
+        self.connection = PAMHelperConnectionReference(connection)
         self.retainedObject = retainedObject
         self.reply = reply
     }
 
+    func failureHandler(detail: String) -> @Sendable () -> Void {
+        { [self] in
+            finish(.transportFailure(detail))
+        }
+    }
+
+    func errorHandler() -> @Sendable (Error) -> Void {
+        { [self] error in
+            finish(.transportFailure(error.localizedDescription))
+        }
+    }
+
+    func mutationReplyHandler() -> @Sendable (Int, String?, String?) -> Void {
+        { [self] code, detail, operationError in
+            if code == PAMHelperReplyCode.transportFailure {
+                finish(
+                    .transportFailure(
+                        operationError
+                            ?? detail
+                            ?? "The PAM helper did not complete the request."
+                    )
+                )
+                return
+            }
+            guard let state = PAMIntegrationStateCode(rawValue: code) else {
+                finish(.transportFailure("The PAM helper returned an unknown state."))
+                return
+            }
+            finish(
+                PAMHelperMutationResult(
+                    inspection: PAMIntegrationInspection(state: state, detail: detail),
+                    operationError: operationError
+                )
+            )
+        }
+    }
+
     func finish(_ result: PAMHelperMutationResult) {
         let values = lock.withLock {
-            () -> (NSXPCConnection, (PAMHelperMutationResult) -> Void)? in
+            () -> (PAMHelperConnectionReference, (PAMHelperMutationResult) -> Void)? in
             guard let connection, let reply else {
                 return nil
             }
@@ -434,8 +508,8 @@ private final class PAMHelperMutationReply: @unchecked Sendable {
         guard let (connection, reply) = values else {
             return
         }
-        connection.invalidate()
         Task { @MainActor in
+            connection.invalidate()
             reply(result)
         }
     }

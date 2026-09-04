@@ -15,6 +15,8 @@ final class PAMUninstallRecoveryStoreTests: XCTestCase {
         for phase in [
             PAMUninstallRecoveryPhase.uninstallPending,
             .helperCleanupRequired,
+            .installOutcomeUnknown,
+            .uninstallOutcomeUnknown,
             .none,
         ] {
             try values.store.save(phase)
@@ -46,7 +48,7 @@ final class PAMUninstallRecoveryStoreTests: XCTestCase {
         XCTAssertThrowsError(try values.store.load()) { error in
             XCTAssertEqual(
                 error.localizedDescription,
-                "The PAM removal recovery file contains an invalid value."
+                "The PAM change recovery file contains an invalid value."
             )
         }
     }

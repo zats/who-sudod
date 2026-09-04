@@ -1,6 +1,7 @@
 import Foundation
-import XCTest
+import ServiceManagement
 @testable import WhoSudod
+import XCTest
 
 enum PAMTestCall: Equatable {
     case requestSystemAdministrationAccess
@@ -176,7 +177,7 @@ final class FakePAMHelperClient: PAMHelperCalling {
     }
 
     func status(
-        expectedBuildIdentity: PAMHelperBuildIdentity,
+        expectedBuildIdentity _: PAMHelperBuildIdentity,
         reply: @escaping (Int, String?) -> Void
     ) {
         recorder.calls.append(.status)
@@ -298,6 +299,40 @@ private enum PAMControllerTestError: LocalizedError {
 
 @MainActor
 final class PAMIntegrationControllerTests: XCTestCase {
+    #if DEBUG
+        func testDevelopmentBuildCannotRegisterTheProductionPAMService() {
+            let service = SystemPAMHelperServiceController()
+
+            XCTAssertEqual(service.state, .unavailable)
+            XCTAssertThrowsError(try service.register()) { error in
+                XCTAssertEqual(
+                    error.localizedDescription,
+                    "PAM registration is available only in Developer ID builds."
+                )
+            }
+        }
+    #endif
+
+    func testNeverSeenPackagedHelperIsRegisterable() {
+        XCTAssertEqual(
+            SystemPAMHelperServiceController.resolvedState(
+                for: .notFound,
+                embeddedServiceExists: true
+            ),
+            .notRegistered
+        )
+    }
+
+    func testMissingPackagedHelperIsUnavailable() {
+        XCTAssertEqual(
+            SystemPAMHelperServiceController.resolvedState(
+                for: .notFound,
+                embeddedServiceExists: false
+            ),
+            .unavailable
+        )
+    }
+
     func testConstructorSnapshotIsNotATrustedRefreshResult() {
         let values = dependencies(serviceState: .notRegistered)
 
@@ -329,9 +364,9 @@ final class PAMIntegrationControllerTests: XCTestCase {
         XCTAssertEqual(
             values.recorder.calls,
             [
-                .requestSystemAdministrationAccess,
                 .register,
                 .preflight,
+                .requestSystemAdministrationAccess,
                 .authorize,
                 .install(values.authorization),
             ]
@@ -349,8 +384,8 @@ final class PAMIntegrationControllerTests: XCTestCase {
         XCTAssertEqual(
             values.recorder.calls,
             [
-                .requestSystemAdministrationAccess,
                 .preflight,
+                .requestSystemAdministrationAccess,
                 .authorize,
                 .install(values.authorization),
             ]
@@ -368,7 +403,7 @@ final class PAMIntegrationControllerTests: XCTestCase {
 
         XCTAssertEqual(
             values.recorder.calls,
-            [.requestSystemAdministrationAccess, .preflight, .unregister]
+            [.preflight, .unregister]
         )
 
         values.service.finishPendingUnregister()
@@ -376,11 +411,11 @@ final class PAMIntegrationControllerTests: XCTestCase {
         XCTAssertEqual(
             values.recorder.calls,
             [
-                .requestSystemAdministrationAccess,
                 .preflight,
                 .unregister,
                 .register,
                 .preflight,
+                .requestSystemAdministrationAccess,
                 .authorize,
                 .install(values.authorization),
             ]
@@ -400,7 +435,6 @@ final class PAMIntegrationControllerTests: XCTestCase {
         XCTAssertEqual(
             values.recorder.calls,
             [
-                .requestSystemAdministrationAccess,
                 .preflight,
                 .unregister,
                 .register,
@@ -416,14 +450,14 @@ final class PAMIntegrationControllerTests: XCTestCase {
     func testInvalidEmbeddedHelperDoesNotRemoveRegisteredServiceOrAuthorize() {
         let values = dependencies(serviceState: .enabled)
         values.helper.preflightResults = [
-            .failure(.invalidEmbeddedBuild("Embedded helper is invalid."))
+            .failure(.invalidEmbeddedBuild("Embedded helper is invalid.")),
         ]
 
         values.controller.install()
 
         XCTAssertEqual(
             values.recorder.calls,
-            [.requestSystemAdministrationAccess, .preflight]
+            [.preflight]
         )
         XCTAssertEqual(
             values.controller.snapshot.operationError,
@@ -439,7 +473,7 @@ final class PAMIntegrationControllerTests: XCTestCase {
 
         XCTAssertEqual(
             values.recorder.calls,
-            [.requestSystemAdministrationAccess, .register, .openApprovalSettings]
+            [.register, .openApprovalSettings]
         )
         XCTAssertEqual(values.controller.snapshot.helper, .requiresApproval)
         XCTAssertEqual(
@@ -457,7 +491,7 @@ final class PAMIntegrationControllerTests: XCTestCase {
 
         XCTAssertEqual(
             values.recorder.calls,
-            [.requestSystemAdministrationAccess, .register, .openApprovalSettings]
+            [.register, .openApprovalSettings]
         )
         XCTAssertEqual(values.controller.snapshot.helper, .requiresApproval)
         XCTAssertEqual(
@@ -471,7 +505,7 @@ final class PAMIntegrationControllerTests: XCTestCase {
 
         values.controller.install()
 
-        XCTAssertEqual(values.recorder.calls, [.requestSystemAdministrationAccess])
+        XCTAssertTrue(values.recorder.calls.isEmpty)
         XCTAssertEqual(values.controller.snapshot.helper, .unavailable)
         XCTAssertEqual(
             values.controller.snapshot.operationError,
@@ -479,7 +513,7 @@ final class PAMIntegrationControllerTests: XCTestCase {
         )
     }
 
-    func testInstallAccessDenialStopsBeforeHelperPreparationAndMutation() {
+    func testInstallAccessDenialStopsAfterHelperPreparationAndBeforeMutation() {
         let values = dependencies(
             serviceState: .notRegistered,
             systemAdministrationAccessError: PAMControllerTestError.systemAdministrationAccess
@@ -487,8 +521,11 @@ final class PAMIntegrationControllerTests: XCTestCase {
 
         values.controller.install()
 
-        XCTAssertEqual(values.recorder.calls, [.requestSystemAdministrationAccess])
-        XCTAssertEqual(values.service.state, .notRegistered)
+        XCTAssertEqual(
+            values.recorder.calls,
+            [.register, .preflight, .requestSystemAdministrationAccess]
+        )
+        XCTAssertEqual(values.service.state, .enabled)
         XCTAssertNil(values.helper.installBuildIdentity)
         XCTAssertEqual(
             values.controller.snapshot.operationError,
@@ -506,7 +543,7 @@ final class PAMIntegrationControllerTests: XCTestCase {
 
         XCTAssertEqual(
             values.recorder.calls,
-            [.requestSystemAdministrationAccess, .preflight, .authorize]
+            [.preflight, .requestSystemAdministrationAccess, .authorize]
         )
         XCTAssertNil(values.controller.snapshot.operationError)
     }
@@ -521,24 +558,95 @@ final class PAMIntegrationControllerTests: XCTestCase {
 
         XCTAssertEqual(
             values.recorder.calls,
-            [.requestSystemAdministrationAccess, .preflight, .authorize]
+            [.preflight, .requestSystemAdministrationAccess, .authorize]
         )
         XCTAssertEqual(values.controller.snapshot.operationError, "Authorization failed.")
     }
 
-    func testInstallTransportFailureKeepsInstallActionRetryable() {
+    func testInstallTransportFailureAllowsOnlySafeInstallRetry() {
         let values = dependencies(serviceState: .enabled, localState: .notInstalled)
         values.helper.installResponse = .transportFailure(
             "The exact helper connection failed."
         )
 
         values.controller.install()
+        values.controller.uninstall()
 
-        XCTAssertEqual(values.controller.snapshot.integration.state, .notInstalled)
+        XCTAssertEqual(values.recoveryStore.phase, .installOutcomeUnknown)
+        XCTAssertTrue(values.controller.snapshot.mutationOutcomeUnknown)
+        XCTAssertFalse(values.controller.snapshot.operationInProgress)
         XCTAssertEqual(
-            values.controller.snapshot.operationError,
-            "The exact helper connection failed."
+            values.recorder.calls,
+            [
+                .preflight,
+                .requestSystemAdministrationAccess,
+                .authorize,
+                .install(values.authorization),
+            ]
         )
+
+        values.helper.installResponse = pamMutationResult(.installed)
+        values.controller.install()
+
+        XCTAssertEqual(values.recoveryStore.phase, .none)
+        XCTAssertFalse(values.controller.snapshot.mutationOutcomeUnknown)
+        XCTAssertFalse(values.controller.snapshot.operationInProgress)
+        XCTAssertEqual(values.controller.snapshot.integration.state, .installed)
+        XCTAssertNil(values.controller.snapshot.operationError)
+    }
+
+    func testMissingInstallReplyOffersSameMutationRetryAfterTheWatchdog() async {
+        let values = dependencies(
+            serviceState: .enabled,
+            localState: .notInstalled,
+            mutationReplyTimeout: .milliseconds(10)
+        )
+        values.helper.installResponse = nil
+
+        values.controller.install()
+
+        XCTAssertEqual(values.recoveryStore.phase, .installOutcomeUnknown)
+        XCTAssertTrue(values.controller.snapshot.operationInProgress)
+
+        try? await Task.sleep(for: .milliseconds(30))
+
+        XCTAssertEqual(
+            values.recorder.calls,
+            [
+                .preflight,
+                .requestSystemAdministrationAccess,
+                .authorize,
+                .install(values.authorization),
+            ]
+        )
+        XCTAssertEqual(values.recoveryStore.phase, .installOutcomeUnknown)
+        XCTAssertTrue(values.controller.snapshot.mutationOutcomeUnknown)
+        XCTAssertFalse(values.controller.snapshot.operationInProgress)
+
+        values.helper.installResponse = pamMutationResult(.installed)
+        values.controller.install()
+
+        XCTAssertEqual(values.recoveryStore.phase, .none)
+        XCTAssertEqual(values.controller.snapshot.integration.state, .installed)
+        XCTAssertFalse(values.controller.snapshot.operationInProgress)
+    }
+
+    func testLateInstallReplyStillCompletesTheOwnedUnknownMutation() async {
+        let values = dependencies(
+            serviceState: .enabled,
+            localState: .notInstalled,
+            mutationReplyTimeout: .milliseconds(10)
+        )
+        values.helper.installResponse = nil
+
+        values.controller.install()
+        try? await Task.sleep(for: .milliseconds(30))
+        values.helper.completeInstall(with: pamMutationResult(.installed))
+
+        XCTAssertEqual(values.recoveryStore.phase, .none)
+        XCTAssertEqual(values.controller.snapshot.integration.state, .installed)
+        XCTAssertFalse(values.controller.snapshot.mutationOutcomeUnknown)
+        XCTAssertFalse(values.controller.snapshot.operationInProgress)
     }
 
     func testRepairUsesTheInstallOperation() {
@@ -555,8 +663,8 @@ final class PAMIntegrationControllerTests: XCTestCase {
         XCTAssertEqual(
             values.recorder.calls,
             [
-                .requestSystemAdministrationAccess,
                 .preflight,
+                .requestSystemAdministrationAccess,
                 .authorize,
                 .install(values.authorization),
             ]
@@ -565,7 +673,7 @@ final class PAMIntegrationControllerTests: XCTestCase {
         XCTAssertNil(values.controller.snapshot.operationError)
     }
 
-    func testRepairAccessDenialStopsBeforeHelperPreparationAndMutation() {
+    func testRepairAccessDenialStopsAfterHelperPreparationAndBeforeMutation() {
         let values = dependencies(
             serviceState: .enabled,
             systemAdministrationAccessError: PAMControllerTestError.systemAdministrationAccess
@@ -579,7 +687,10 @@ final class PAMIntegrationControllerTests: XCTestCase {
 
         values.controller.install()
 
-        XCTAssertEqual(values.recorder.calls, [.requestSystemAdministrationAccess])
+        XCTAssertEqual(
+            values.recorder.calls,
+            [.preflight, .requestSystemAdministrationAccess]
+        )
         XCTAssertNil(values.helper.installBuildIdentity)
         XCTAssertEqual(
             values.controller.snapshot.operationError,
@@ -598,8 +709,8 @@ final class PAMIntegrationControllerTests: XCTestCase {
         XCTAssertEqual(
             values.recorder.calls,
             [
-                .requestSystemAdministrationAccess,
                 .preflight,
+                .requestSystemAdministrationAccess,
                 .authorize,
                 .install(values.authorization),
             ]
@@ -611,12 +722,12 @@ final class PAMIntegrationControllerTests: XCTestCase {
         XCTAssertEqual(
             values.recorder.calls,
             [
-                .requestSystemAdministrationAccess,
                 .preflight,
+                .requestSystemAdministrationAccess,
                 .authorize,
                 .install(values.authorization),
-                .requestSystemAdministrationAccess,
                 .preflight,
+                .requestSystemAdministrationAccess,
                 .authorize,
                 .uninstall(values.authorization),
                 .unregister,
@@ -632,8 +743,8 @@ final class PAMIntegrationControllerTests: XCTestCase {
         XCTAssertEqual(
             values.recorder.calls,
             [
-                .requestSystemAdministrationAccess,
                 .preflight,
+                .requestSystemAdministrationAccess,
                 .authorize,
                 .uninstall(values.authorization),
                 .unregister,
@@ -644,7 +755,7 @@ final class PAMIntegrationControllerTests: XCTestCase {
         XCTAssertEqual(values.helper.uninstallBuildIdentity, values.helper.buildIdentity)
     }
 
-    func testUninstallAccessDenialStopsBeforeHelperPreparationAndMutation() {
+    func testUninstallAccessDenialStopsAfterHelperPreparationAndBeforeMutation() {
         let values = dependencies(
             serviceState: .enabled,
             systemAdministrationAccessError: PAMControllerTestError.systemAdministrationAccess
@@ -652,7 +763,10 @@ final class PAMIntegrationControllerTests: XCTestCase {
 
         values.controller.uninstall()
 
-        XCTAssertEqual(values.recorder.calls, [.requestSystemAdministrationAccess])
+        XCTAssertEqual(
+            values.recorder.calls,
+            [.preflight, .requestSystemAdministrationAccess]
+        )
         XCTAssertNil(values.helper.uninstallBuildIdentity)
         XCTAssertTrue(values.recoveryStore.savedPhases.isEmpty)
         XCTAssertEqual(
@@ -661,13 +775,13 @@ final class PAMIntegrationControllerTests: XCTestCase {
         )
     }
 
-    func testUninstallWritesPendingPhaseBeforeHelperRepliesAndKeepsItOnFailure() {
+    func testUninstallWritesUnknownPhaseBeforeHelperRepliesAndMarksKnownFailurePending() {
         let values = dependencies(serviceState: .enabled)
         values.helper.uninstallResponse = nil
 
         values.controller.uninstall()
 
-        XCTAssertEqual(values.recoveryStore.phase, .uninstallPending)
+        XCTAssertEqual(values.recoveryStore.phase, .uninstallOutcomeUnknown)
 
         values.helper.completeUninstall(
             with: pamMutationResult(
@@ -687,9 +801,9 @@ final class PAMIntegrationControllerTests: XCTestCase {
 
         XCTAssertEqual(
             values.recorder.calls,
-            [.requestSystemAdministrationAccess, .preflight, .authorize]
+            [.preflight, .requestSystemAdministrationAccess, .authorize]
         )
-        XCTAssertEqual(values.recoveryStore.savedPhases, [.uninstallPending])
+        XCTAssertEqual(values.recoveryStore.savedPhases, [.uninstallOutcomeUnknown])
         XCTAssertEqual(values.recoveryStore.phase, .none)
         XCTAssertEqual(
             values.controller.snapshot.operationError,
@@ -697,19 +811,39 @@ final class PAMIntegrationControllerTests: XCTestCase {
         )
     }
 
-    func testUninstallTransportFailureKeepsPendingPhaseAndInspectedState() {
+    func testUninstallTransportFailureAllowsOnlySafeRemovalRetry() {
         let values = dependencies(serviceState: .enabled)
         values.helper.uninstallResponse = .transportFailure(
             "The exact helper connection failed."
         )
 
         values.controller.uninstall()
+        values.controller.install()
 
-        XCTAssertEqual(values.controller.snapshot.integration.state, .installed)
-        XCTAssertEqual(values.recoveryStore.phase, .uninstallPending)
+        XCTAssertEqual(values.recoveryStore.phase, .uninstallOutcomeUnknown)
+        XCTAssertTrue(values.controller.snapshot.mutationOutcomeUnknown)
+        XCTAssertFalse(values.controller.snapshot.operationInProgress)
+
+        values.helper.uninstallResponse = pamMutationResult(.notInstalled)
+        values.controller.uninstall()
+
+        XCTAssertEqual(values.controller.snapshot.integration.state, .notInstalled)
+        XCTAssertEqual(values.recoveryStore.phase, .none)
+        XCTAssertEqual(values.controller.snapshot.helper, .notRegistered)
+        XCTAssertFalse(values.controller.snapshot.mutationOutcomeUnknown)
         XCTAssertEqual(
-            values.controller.snapshot.operationError,
-            "The exact helper connection failed."
+            values.recorder.calls,
+            [
+                .preflight,
+                .requestSystemAdministrationAccess,
+                .authorize,
+                .uninstall(values.authorization),
+                .preflight,
+                .requestSystemAdministrationAccess,
+                .authorize,
+                .uninstall(values.authorization),
+                .unregister,
+            ]
         )
     }
 
@@ -726,8 +860,8 @@ final class PAMIntegrationControllerTests: XCTestCase {
         XCTAssertEqual(
             values.recorder.calls,
             [
-                .requestSystemAdministrationAccess,
                 .preflight,
+                .requestSystemAdministrationAccess,
                 .authorize,
                 .uninstall(values.authorization),
             ]
@@ -752,8 +886,8 @@ final class PAMIntegrationControllerTests: XCTestCase {
         values.controller.uninstall()
 
         XCTAssertEqual(values.recorder.calls, [
-            .requestSystemAdministrationAccess,
             .preflight,
+            .requestSystemAdministrationAccess,
             .authorize,
             .uninstall(values.authorization),
         ])
@@ -775,8 +909,8 @@ final class PAMIntegrationControllerTests: XCTestCase {
         values.controller.uninstall()
 
         XCTAssertEqual(values.recorder.calls, [
-            .requestSystemAdministrationAccess,
             .preflight,
+            .requestSystemAdministrationAccess,
             .authorize,
             .uninstall(values.authorization),
             .unregister,
@@ -811,8 +945,8 @@ final class PAMIntegrationControllerTests: XCTestCase {
         XCTAssertEqual(
             values.recorder.calls,
             [
-                .requestSystemAdministrationAccess,
                 .preflight,
+                .requestSystemAdministrationAccess,
                 .authorize,
                 .uninstall(values.authorization),
                 .unregister,
@@ -871,6 +1005,151 @@ final class PAMIntegrationControllerTests: XCTestCase {
         XCTAssertEqual(values.controller.snapshot.integration.state, .installed)
     }
 
+    func testPersistedUnknownInstallAllowsOnlyTheSameMutation() {
+        let values = dependencies(
+            serviceState: .enabled,
+            localState: .notInstalled,
+            recoveryPhase: .installOutcomeUnknown
+        )
+
+        values.controller.uninstall()
+
+        XCTAssertTrue(values.recorder.calls.isEmpty)
+        XCTAssertTrue(values.controller.snapshot.mutationOutcomeUnknown)
+
+        values.controller.install()
+
+        XCTAssertEqual(
+            values.recorder.calls,
+            [
+                .preflight,
+                .requestSystemAdministrationAccess,
+                .authorize,
+                .install(values.authorization),
+            ]
+        )
+        XCTAssertEqual(values.recoveryStore.phase, .none)
+        XCTAssertEqual(values.controller.snapshot.integration.state, .installed)
+        XCTAssertFalse(values.controller.snapshot.mutationOutcomeUnknown)
+        XCTAssertFalse(values.controller.snapshot.operationInProgress)
+    }
+
+    func testPersistedUnknownInstallRegistersMissingHelperBeforeRetry() {
+        let values = dependencies(
+            serviceState: .notRegistered,
+            localState: .notInstalled,
+            recoveryPhase: .installOutcomeUnknown
+        )
+
+        values.controller.install()
+
+        XCTAssertEqual(
+            values.recorder.calls,
+            [
+                .register,
+                .preflight,
+                .requestSystemAdministrationAccess,
+                .authorize,
+                .install(values.authorization),
+            ]
+        )
+        XCTAssertEqual(values.recoveryStore.phase, .none)
+        XCTAssertEqual(values.controller.snapshot.integration.state, .installed)
+    }
+
+    func testPersistedUnknownInstallReplacesMismatchedHelperBeforeRetry() {
+        let values = dependencies(
+            serviceState: .enabled,
+            localState: .needsRepair,
+            recoveryPhase: .installOutcomeUnknown
+        )
+        values.helper.preflightResults = [
+            .failure(.identityMismatch),
+            .success(values.helper.buildIdentity),
+        ]
+
+        values.controller.install()
+
+        XCTAssertEqual(
+            values.recorder.calls,
+            [
+                .preflight,
+                .unregister,
+                .register,
+                .preflight,
+                .requestSystemAdministrationAccess,
+                .authorize,
+                .install(values.authorization),
+            ]
+        )
+        XCTAssertEqual(values.recoveryStore.phase, .none)
+        XCTAssertEqual(values.controller.snapshot.integration.state, .installed)
+    }
+
+    func testRefreshKeepsUnknownOutcomeAndDoesNotUseUnorderedStatus() {
+        let values = dependencies(
+            serviceState: .enabled,
+            localState: .notInstalled,
+            recoveryPhase: .installOutcomeUnknown
+        )
+
+        values.controller.refresh()
+
+        XCTAssertEqual(values.recoveryStore.phase, .installOutcomeUnknown)
+        XCTAssertTrue(values.controller.snapshot.mutationOutcomeUnknown)
+        XCTAssertFalse(values.controller.snapshot.operationInProgress)
+        XCTAssertTrue(values.recorder.calls.isEmpty)
+    }
+
+    func testLateInstallReplyCannotOverwriteACompletedRetry() async {
+        let values = dependencies(
+            serviceState: .enabled,
+            localState: .notInstalled,
+            mutationReplyTimeout: .milliseconds(10)
+        )
+        values.helper.installResponse = nil
+        values.controller.install()
+        let staleReply = values.helper.pendingInstallReply
+        try? await Task.sleep(for: .milliseconds(30))
+
+        values.helper.installResponse = pamMutationResult(.installed)
+        values.controller.install()
+        staleReply?(
+            pamMutationResult(
+                .needsRepair,
+                detail: "Stale state.",
+                operationError: "Stale failure."
+            )
+        )
+
+        XCTAssertEqual(values.controller.snapshot.integration.state, .installed)
+        XCTAssertNil(values.controller.snapshot.integration.detail)
+        XCTAssertNil(values.controller.snapshot.operationError)
+    }
+
+    func testPersistedUnknownUninstallRetriesTheRemovalMutation() {
+        let values = dependencies(
+            serviceState: .enabled,
+            recoveryPhase: .uninstallOutcomeUnknown
+        )
+
+        values.controller.uninstall()
+
+        XCTAssertEqual(
+            values.recorder.calls,
+            [
+                .preflight,
+                .requestSystemAdministrationAccess,
+                .authorize,
+                .uninstall(values.authorization),
+                .unregister,
+            ]
+        )
+        XCTAssertEqual(values.recoveryStore.phase, .none)
+        XCTAssertFalse(values.controller.snapshot.mutationOutcomeUnknown)
+        XCTAssertNil(values.controller.snapshot.operationError)
+    }
+
     func testPendingRefreshCannotOverwriteNewerInstallResult() {
         let values = dependencies(serviceState: .enabled)
         values.helper.statusResponse = nil
@@ -887,8 +1166,8 @@ final class PAMIntegrationControllerTests: XCTestCase {
             [
                 .preflight,
                 .status,
-                .requestSystemAdministrationAccess,
                 .preflight,
+                .requestSystemAdministrationAccess,
                 .authorize,
                 .install(values.authorization),
             ]
@@ -913,11 +1192,26 @@ final class PAMIntegrationControllerTests: XCTestCase {
         XCTAssertNil(values.controller.snapshot.operationError)
     }
 
-    func testAcceptedPreflightFailureCompletesRefreshWithLocalState() {
-        let values = dependencies(serviceState: .enabled, localState: .needsRepair)
+    func testRefreshReportsUnreachableHelperWithoutMutatingService() {
+        let values = dependencies(serviceState: .enabled, localState: .installed)
         values.helper.preflightResults = [
-            .failure(.serviceUnavailable("The helper connection failed."))
+            .failure(.serviceUnavailable("The old helper did not start.")),
         ]
+
+        values.controller.refresh()
+
+        XCTAssertTrue(values.controller.hasCompletedRefresh)
+        XCTAssertEqual(values.recorder.calls, [.preflight])
+        XCTAssertEqual(values.controller.snapshot.integration.state, .installed)
+        XCTAssertEqual(
+            values.controller.snapshot.operationError,
+            "The old helper did not start."
+        )
+    }
+
+    func testRefreshReportsMismatchedHelperWithoutMutatingService() {
+        let values = dependencies(serviceState: .enabled, localState: .needsRepair)
+        values.helper.preflightResults = [.failure(.identityMismatch)]
 
         values.controller.refresh()
 
@@ -926,7 +1220,7 @@ final class PAMIntegrationControllerTests: XCTestCase {
         XCTAssertEqual(values.controller.snapshot.integration.state, .needsRepair)
         XCTAssertEqual(
             values.controller.snapshot.operationError,
-            "The helper connection failed."
+            PAMHelperBuildIdentityError.mismatch.errorDescription
         )
     }
 
@@ -980,7 +1274,8 @@ final class PAMIntegrationControllerTests: XCTestCase {
         localState: PAMIntegrationStateCode = .installed,
         recoveryPhase: PAMUninstallRecoveryPhase = .none,
         systemAdministrationAccessError: Error? = nil,
-        authorizationResult: Result<PAMOperationAuthorization, Error>? = nil
+        authorizationResult: Result<PAMOperationAuthorization, Error>? = nil,
+        mutationReplyTimeout: Duration = .seconds(5)
     ) -> (
         controller: PAMIntegrationController,
         service: FakePAMHelperServiceController,
@@ -1022,7 +1317,8 @@ final class PAMIntegrationControllerTests: XCTestCase {
             recoveryStore: recoveryStore,
             localInspection: {
                 localInspector.inspection
-            }
+            },
+            mutationReplyTimeout: mutationReplyTimeout
         )
         return (
             controller,

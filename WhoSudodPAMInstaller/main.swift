@@ -1,69 +1,8 @@
 import Foundation
 
-final class PAMInstallerLifecycle: @unchecked Sendable {
-    private let lock = NSLock()
-    private var connections: [ObjectIdentifier: NSXPCConnection] = [:]
-    private var activeOperations = 0
-    private var exitGeneration: UInt64 = 0
-
-    init() {
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
-            self?.exitIfStillIdle(generation: 0)
-        }
-    }
-
-    func add(_ connection: NSXPCConnection) {
-        lock.withLock {
-            exitGeneration &+= 1
-            connections[ObjectIdentifier(connection)] = connection
-        }
-    }
-
-    func remove(_ connection: NSXPCConnection) {
-        lock.withLock {
-            connections.removeValue(forKey: ObjectIdentifier(connection))
-            scheduleExitIfIdle()
-        }
-    }
-
-    func beginOperation() {
-        lock.withLock {
-            exitGeneration &+= 1
-            activeOperations += 1
-        }
-    }
-
-    func endOperation() {
-        lock.withLock {
-            activeOperations -= 1
-            scheduleExitIfIdle()
-        }
-    }
-
-    private func scheduleExitIfIdle() {
-        guard connections.isEmpty, activeOperations == 0 else {
-            return
-        }
-        exitGeneration &+= 1
-        let generation = exitGeneration
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
-            self?.exitIfStillIdle(generation: generation)
-        }
-    }
-
-    private func exitIfStillIdle(generation: UInt64) {
-        let shouldExit = lock.withLock {
-            exitGeneration == generation
-                && connections.isEmpty
-                && activeOperations == 0
-        }
-        if shouldExit {
-            exit(EXIT_SUCCESS)
-        }
-    }
-}
-
 final class PAMInstallerService: NSObject, PAMInstallerXPCProtocol {
+    private static let shuttingDownDetail = "The PAM helper is shutting down. Try again."
+
     private let files = PAMInstallerFileManager()
     private let mutationAuthorizationGate = PAMInstallerMutationAuthorizationGate()
     private let clientAuditSessionGate = PAMInstallerClientAuditSessionGate()
@@ -75,7 +14,11 @@ final class PAMInstallerService: NSObject, PAMInstallerXPCProtocol {
     }
 
     func buildIdentity(reply: @escaping (Data?, String?) -> Void) {
-        lifecycle.beginOperation()
+        guard lifecycle.beginOperation() else {
+            reply(nil, Self.shuttingDownDetail)
+            return
+        }
+        defer { lifecycle.endOperation() }
         do {
             let identity = try PAMHelperBuildIdentity.currentHelper()
             reply(identity.token, nil)
@@ -85,7 +28,6 @@ final class PAMInstallerService: NSObject, PAMInstallerXPCProtocol {
                 (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
             )
         }
-        lifecycle.endOperation()
     }
 
     func status(reply: @escaping (Int, String?) -> Void) {
@@ -122,10 +64,13 @@ final class PAMInstallerService: NSObject, PAMInstallerXPCProtocol {
         _ operation: () -> PAMIntegrationInspection,
         reply: @escaping (Int, String?) -> Void
     ) {
-        lifecycle.beginOperation()
+        guard lifecycle.beginOperation() else {
+            reply(PAMHelperReplyCode.transportFailure, Self.shuttingDownDetail)
+            return
+        }
+        defer { lifecycle.endOperation() }
         let inspection = lock.withLock(operation)
         reply(inspection.state.rawValue, inspection.detail)
-        lifecycle.endOperation()
     }
 
     private func perform(
@@ -134,7 +79,15 @@ final class PAMInstallerService: NSObject, PAMInstallerXPCProtocol {
         operation: () -> PAMInstallerMutationResult,
         reply: @escaping (Int, String?, String?) -> Void
     ) {
-        lifecycle.beginOperation()
+        guard lifecycle.beginOperation() else {
+            reply(
+                PAMHelperReplyCode.transportFailure,
+                nil,
+                Self.shuttingDownDetail
+            )
+            return
+        }
+        defer { lifecycle.endOperation() }
         guard let connection = NSXPCConnection.current() else {
             let result = PAMInstallerMutationResult(
                 inspection: files.inspect(),
@@ -146,7 +99,6 @@ final class PAMInstallerService: NSObject, PAMInstallerXPCProtocol {
                 result.inspection.detail,
                 result.operationError
             )
-            lifecycle.endOperation()
             return
         }
         let clientAuditSession = PAMInstallerClientAuditSession(
@@ -178,7 +130,6 @@ final class PAMInstallerService: NSObject, PAMInstallerXPCProtocol {
             result.inspection.detail,
             result.operationError
         )
-        lifecycle.endOperation()
     }
 }
 
@@ -193,7 +144,9 @@ final class PAMInstallerListenerDelegate: NSObject, NSXPCListenerDelegate {
         guard connection.processIdentifier > 0 else {
             return false
         }
-        lifecycle.add(connection)
+        guard lifecycle.add(connection) else {
+            return false
+        }
         let finish = { [weak lifecycle, weak connection] in
             guard let connection else {
                 return
