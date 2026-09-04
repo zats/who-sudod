@@ -1,6 +1,6 @@
 import Foundation
-import XCTest
 @testable import WhoSudod
+import XCTest
 
 @MainActor
 final class SettingsModelTests: XCTestCase {
@@ -89,6 +89,40 @@ final class SettingsModelTests: XCTestCase {
         XCTAssertTrue(value.actionTitle.isEmpty)
         XCTAssertFalse(value.isWarning)
         XCTAssertTrue(value.isLoading)
+    }
+
+    func testUnknownInstallPresentationOffersSafeRetry() {
+        let value = PAMSettingsPresentation(
+            snapshot: PAMIntegrationSnapshot(
+                integration: PAMIntegrationInspection(state: .notInstalled, detail: nil),
+                helper: .enabled,
+                operationError: "The helper connection closed.",
+                uninstallRecoveryPhase: .installOutcomeUnknown
+            ),
+            conversationError: nil
+        )
+
+        XCTAssertEqual(value.detail, "The helper connection closed.")
+        XCTAssertEqual(value.action, .install)
+        XCTAssertEqual(value.actionTitle, "Retry Install…")
+        XCTAssertTrue(value.isWarning)
+        XCTAssertFalse(value.isLoading)
+    }
+
+    func testUnknownRemovalPresentationOffersOnlyRemovalRetry() {
+        let value = PAMSettingsPresentation(
+            snapshot: PAMIntegrationSnapshot(
+                integration: PAMIntegrationInspection(state: .needsRepair, detail: nil),
+                helper: .enabled,
+                operationError: nil,
+                uninstallRecoveryPhase: .uninstallOutcomeUnknown
+            ),
+            conversationError: nil
+        )
+
+        XCTAssertEqual(value.action, .uninstall)
+        XCTAssertEqual(value.actionTitle, "Retry Removal…")
+        XCTAssertTrue(value.isWarning)
     }
 
     func testUnavailableHelperCannotInstall() {
@@ -240,7 +274,7 @@ final class SettingsModelTests: XCTestCase {
         XCTAssertTrue(value.isWarning)
     }
 
-    func testRequestAndCancelPAMActionUpdatesConfirmationState() {
+    func testRequestInstallRunsImmediatelyWithoutConfirmation() {
         let values = dependencies()
         let model = SettingsModel(
             pamIntegration: values.controller,
@@ -250,27 +284,64 @@ final class SettingsModelTests: XCTestCase {
 
         model.requestPAMAction()
 
-        XCTAssertEqual(model.pendingPAMAction, .install)
-        XCTAssertTrue(model.isPAMConfirmationPresented)
-
-        model.cancelPAMAction()
-
-        XCTAssertNil(model.pendingPAMAction)
+        XCTAssertNil(model.pendingPAMConfirmation)
         XCTAssertFalse(model.isPAMConfirmationPresented)
+        XCTAssertEqual(
+            values.recorder.calls,
+            [
+                .preflight,
+                .requestSystemAdministrationAccess,
+                .authorize,
+                .install(values.authorization),
+            ]
+        )
+        XCTAssertEqual(model.pamSnapshot.integration.state, .installed)
     }
 
-    func testExplicitPAMActionRequestAcceptsCurrentAction() {
-        let values = dependencies()
+    func testRequestRepairRunsImmediatelyWithoutConfirmation() {
+        let values = dependencies(integrationState: .needsRepair)
         let model = SettingsModel(
             pamIntegration: values.controller,
             pamConversationError: nil,
             userDefaults: isolatedUserDefaults()
         )
+        values.recorder.calls.removeAll()
 
-        model.requestPAMAction(.install)
+        model.requestPAMAction()
 
-        XCTAssertEqual(model.pendingPAMAction, .install)
+        XCTAssertNil(model.pendingPAMConfirmation)
+        XCTAssertFalse(model.isPAMConfirmationPresented)
+        XCTAssertEqual(
+            values.recorder.calls,
+            [
+                .preflight,
+                .requestSystemAdministrationAccess,
+                .authorize,
+                .install(values.authorization),
+            ]
+        )
+        XCTAssertEqual(model.pamSnapshot.integration.state, .installed)
+    }
+
+    func testRequestUninstallStillRequiresConfirmation() {
+        let values = dependencies(integrationState: .installed)
+        let model = SettingsModel(
+            pamIntegration: values.controller,
+            pamConversationError: nil,
+            userDefaults: isolatedUserDefaults()
+        )
+        values.recorder.calls.removeAll()
+
+        model.requestPAMAction(.uninstall)
+
+        XCTAssertEqual(model.pendingPAMConfirmation?.action, .uninstall)
         XCTAssertTrue(model.isPAMConfirmationPresented)
+        XCTAssertTrue(values.recorder.calls.isEmpty)
+
+        model.cancelPAMAction()
+
+        XCTAssertNil(model.pendingPAMConfirmation)
+        XCTAssertFalse(model.isPAMConfirmationPresented)
     }
 
     func testExplicitPAMActionRequestRejectsMismatchedAction() {
@@ -283,8 +354,9 @@ final class SettingsModelTests: XCTestCase {
 
         model.requestPAMAction(.repair)
 
-        XCTAssertNil(model.pendingPAMAction)
+        XCTAssertNil(model.pendingPAMConfirmation)
         XCTAssertFalse(model.isPAMConfirmationPresented)
+        XCTAssertTrue(values.recorder.calls.isEmpty)
     }
 
     func testExplicitPAMActionRequestRejectsStaleAction() throws {
@@ -297,60 +369,24 @@ final class SettingsModelTests: XCTestCase {
         let staleAction = try XCTUnwrap(model.pamPresentation.notchAction?.action)
         values.helper.statusResponse = PAMTestHelperResponse(.installed)
         values.controller.refresh()
+        values.recorder.calls.removeAll()
 
         model.requestPAMAction(staleAction)
 
-        XCTAssertNil(model.pendingPAMAction)
+        XCTAssertNil(model.pendingPAMConfirmation)
         XCTAssertFalse(model.isPAMConfirmationPresented)
         XCTAssertEqual(model.pamPresentation.action, .uninstall)
+        XCTAssertTrue(values.recorder.calls.isEmpty)
     }
 
-    func testConfirmInstallRunsAuthorizationAndHelperInstall() {
-        let values = dependencies()
-        let model = SettingsModel(
-            pamIntegration: values.controller,
-            pamConversationError: nil,
-            userDefaults: isolatedUserDefaults()
-        )
-
-        model.confirmPAMAction(.install)
-
-        XCTAssertEqual(
-            values.recorder.calls,
-            [
-                .requestSystemAdministrationAccess,
-                .preflight,
-                .authorize,
-                .install(values.authorization),
-            ]
-        )
-        XCTAssertEqual(model.pamSnapshot.integration.state, .installed)
+    func testOnlyRemovalActionsRequireConfirmation() {
+        XCTAssertNil(PAMSettingsAction.install.confirmation)
+        XCTAssertNil(PAMSettingsAction.repair.confirmation)
+        XCTAssertNotNil(PAMSettingsAction.uninstall.confirmation)
+        XCTAssertNotNil(PAMSettingsAction.finishRemoval.confirmation)
     }
 
-    func testConfirmRepairRunsAuthorizationAndHelperInstall() {
-        let values = dependencies(integrationState: .needsRepair)
-        let model = SettingsModel(
-            pamIntegration: values.controller,
-            pamConversationError: nil,
-            userDefaults: isolatedUserDefaults()
-        )
-        values.recorder.calls.removeAll()
-
-        model.confirmPAMAction(.repair)
-
-        XCTAssertEqual(
-            values.recorder.calls,
-            [
-                .requestSystemAdministrationAccess,
-                .preflight,
-                .authorize,
-                .install(values.authorization),
-            ]
-        )
-        XCTAssertEqual(model.pamSnapshot.integration.state, .installed)
-    }
-
-    func testConfirmUninstallRunsAuthorizationHelperRemovalAndUnregistration() {
+    func testConfirmUninstallRunsAuthorizationHelperRemovalAndUnregistration() throws {
         let values = dependencies(integrationState: .installed)
         let model = SettingsModel(
             pamIntegration: values.controller,
@@ -359,19 +395,44 @@ final class SettingsModelTests: XCTestCase {
         )
         values.recorder.calls.removeAll()
 
-        model.confirmPAMAction(.uninstall)
+        model.requestPAMAction(.uninstall)
+        let confirmation = try XCTUnwrap(model.pendingPAMConfirmation)
+        model.confirmPAMAction(confirmation)
 
         XCTAssertEqual(
             values.recorder.calls,
             [
-                .requestSystemAdministrationAccess,
                 .preflight,
+                .requestSystemAdministrationAccess,
                 .authorize,
                 .uninstall(values.authorization),
                 .unregister,
             ]
         )
         XCTAssertEqual(model.pamSnapshot.helper, .notRegistered)
+    }
+
+    func testStaleRemovalConfirmationCannotRun() throws {
+        let values = dependencies(integrationState: .installed)
+        let model = SettingsModel(
+            pamIntegration: values.controller,
+            pamConversationError: nil,
+            userDefaults: isolatedUserDefaults()
+        )
+        values.recorder.calls.removeAll()
+
+        model.requestPAMAction(.uninstall)
+        let confirmation = try XCTUnwrap(model.pendingPAMConfirmation)
+        values.helper.statusResponse = PAMTestHelperResponse(.notInstalled)
+        values.controller.refresh()
+        values.recorder.calls.removeAll()
+
+        model.confirmPAMAction(confirmation)
+
+        XCTAssertTrue(values.recorder.calls.isEmpty)
+        XCTAssertNil(model.pendingPAMConfirmation)
+        XCTAssertFalse(model.isPAMConfirmationPresented)
+        XCTAssertEqual(model.pamPresentation.action, .install)
     }
 
     func testHelperCleanupFailureOffersFinishRemovalInsteadOfInstall() {
@@ -449,6 +510,33 @@ final class SettingsModelTests: XCTestCase {
         model.refreshPAMIntegration()
 
         XCTAssertEqual(values.recorder.calls, [.preflight, .status])
+    }
+
+    func testRefreshDuringPendingMutationDoesNotShowLoading() {
+        let values = dependencies()
+        values.helper.installResponse = nil
+        let model = SettingsModel(
+            pamIntegration: values.controller,
+            pamConversationError: nil,
+            userDefaults: isolatedUserDefaults()
+        )
+        values.controller.install()
+
+        model.refreshPAMIntegration()
+
+        XCTAssertFalse(model.isPAMRefreshPending)
+        XCTAssertFalse(model.pamPresentation.isLoading)
+        XCTAssertNil(model.pamPresentation.action)
+        XCTAssertEqual(model.pamPresentation.actionTitle, "Finishing…")
+        XCTAssertEqual(
+            values.recorder.calls,
+            [
+                .preflight,
+                .requestSystemAdministrationAccess,
+                .authorize,
+                .install(values.authorization),
+            ]
+        )
     }
 
     private func presentation(

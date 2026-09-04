@@ -186,24 +186,18 @@ private struct PermissionsSettingsSection: View {
                 .foregroundStyle(.secondary)
         }
         .alert(
-            model.pendingPAMAction?.confirmationTitle ?? "Change PAM Password Input?",
+            model.pendingPAMConfirmation?.title ?? "Change PAM Password Input?",
             isPresented: $model.isPAMConfirmationPresented,
-            presenting: model.pendingPAMAction
-        ) { action in
-            if action == .uninstall || action == .finishRemoval {
-                Button(action.confirmationButtonTitle, role: .destructive) {
-                    model.confirmPAMAction(action)
-                }
-            } else {
-                Button(action.confirmationButtonTitle) {
-                    model.confirmPAMAction(action)
-                }
+            presenting: model.pendingPAMConfirmation
+        ) { confirmation in
+            Button(confirmation.buttonTitle, role: .destructive) {
+                model.confirmPAMAction(confirmation)
             }
             Button("Cancel", role: .cancel) {
                 model.cancelPAMAction()
             }
-        } message: { action in
-            Text(action.confirmationMessage)
+        } message: { confirmation in
+            Text(confirmation.message)
         }
     }
 }

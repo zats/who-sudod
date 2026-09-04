@@ -68,44 +68,33 @@ enum PAMSettingsAction: Equatable {
     case uninstall
     case finishRemoval
 
-    var confirmationTitle: String {
+    var confirmation: PAMSettingsConfirmation? {
         switch self {
-        case .install:
-            "Install PAM Password Input?"
-        case .repair:
-            "Repair PAM Password Input?"
         case .uninstall:
-            "Uninstall PAM Password Input?"
+            PAMSettingsConfirmation(
+                action: self,
+                title: "Uninstall PAM Password Input?",
+                message: "This removes only the two Who Sudo'd sudo PAM entries and its installed components. Other PAM entries stay unchanged.",
+                buttonTitle: "Uninstall"
+            )
         case .finishRemoval:
-            "Finish PAM Removal?"
+            PAMSettingsConfirmation(
+                action: self,
+                title: "Finish PAM Removal?",
+                message: "This removes the unused privileged helper registration. The PAM entries and installed components are already removed.",
+                buttonTitle: "Finish Removal"
+            )
+        case .install, .repair:
+            nil
         }
     }
+}
 
-    var confirmationMessage: String {
-        switch self {
-        case .install:
-            "This adds two signed components and two entries to the sudo PAM configuration. Terminal password input will continue to work. A restart is not required."
-        case .repair:
-            "This replaces the Who Sudo'd PAM components and restores its two sudo PAM entries. Other PAM entries stay in their current order."
-        case .uninstall:
-            "This removes only the two Who Sudo'd sudo PAM entries and its installed components. Other PAM entries stay unchanged."
-        case .finishRemoval:
-            "This removes the unused privileged helper registration. The PAM entries and installed components are already removed."
-        }
-    }
-
-    var confirmationButtonTitle: String {
-        switch self {
-        case .install:
-            "Install"
-        case .repair:
-            "Repair"
-        case .uninstall:
-            "Uninstall"
-        case .finishRemoval:
-            "Finish Removal"
-        }
-    }
+struct PAMSettingsConfirmation: Equatable {
+    let action: PAMSettingsAction
+    let title: String
+    let message: String
+    let buttonTitle: String
 }
 
 struct PAMSettingsPresentation: Equatable {
@@ -134,6 +123,41 @@ struct PAMSettingsPresentation: Equatable {
             actionTitle = ""
             isWarning = false
             isLoading = true
+            return
+        }
+
+        if snapshot.operationInProgress {
+            detail = nil
+            action = nil
+            actionTitle = "Finishing…"
+            isWarning = false
+            isLoading = false
+            return
+        }
+
+        if snapshot.mutationOutcomeUnknown {
+            detail = snapshot.operationError
+                ?? "The last PAM change was not confirmed. Retry the same change."
+            if !helperIsAvailable {
+                action = nil
+                actionTitle = "PAM Unavailable"
+            } else {
+                switch snapshot.uninstallRecoveryPhase {
+                case .installOutcomeUnknown:
+                    action = snapshot.integration.state == .needsRepair ? .repair : .install
+                    actionTitle = snapshot.integration.state == .needsRepair
+                        ? "Retry Repair…"
+                        : "Retry Install…"
+                case .uninstallOutcomeUnknown:
+                    action = .uninstall
+                    actionTitle = "Retry Removal…"
+                case .none, .uninstallPending, .helperCleanupRequired:
+                    action = nil
+                    actionTitle = "PAM Unavailable"
+                }
+            }
+            isWarning = true
+            isLoading = false
             return
         }
 
@@ -242,12 +266,12 @@ final class SettingsModel {
 
     private(set) var pamSnapshot: PAMIntegrationSnapshot
     private(set) var pamConversationError: String?
-    private(set) var pendingPAMAction: PAMSettingsAction?
+    private(set) var pendingPAMConfirmation: PAMSettingsConfirmation?
     private(set) var isPAMRefreshPending = false
     var isPAMConfirmationPresented = false {
         didSet {
             if !isPAMConfirmationPresented {
-                pendingPAMAction = nil
+                pendingPAMConfirmation = nil
             }
         }
     }
@@ -286,7 +310,9 @@ final class SettingsModel {
             return
         }
         isPAMRefreshPending = true
-        pamIntegration.refresh()
+        if !pamIntegration.refresh() {
+            isPAMRefreshPending = false
+        }
     }
 
     func updatePAMConversationError(_ error: String?) {
@@ -304,7 +330,11 @@ final class SettingsModel {
         guard pamPresentation.action == action else {
             return
         }
-        pendingPAMAction = action
+        guard let confirmation = action.confirmation else {
+            performPAMAction(action)
+            return
+        }
+        pendingPAMConfirmation = confirmation
         isPAMConfirmationPresented = true
     }
 
@@ -312,8 +342,18 @@ final class SettingsModel {
         isPAMConfirmationPresented = false
     }
 
-    func confirmPAMAction(_ action: PAMSettingsAction) {
+    func confirmPAMAction(_ confirmation: PAMSettingsConfirmation) {
+        guard pendingPAMConfirmation == confirmation else {
+            return
+        }
         isPAMConfirmationPresented = false
+        guard pamPresentation.action == confirmation.action else {
+            return
+        }
+        performPAMAction(confirmation.action)
+    }
+
+    private func performPAMAction(_ action: PAMSettingsAction) {
         switch action {
         case .install, .repair:
             pamIntegration.install()
