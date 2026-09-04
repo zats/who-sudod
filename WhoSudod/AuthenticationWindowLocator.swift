@@ -493,26 +493,88 @@ enum AuthenticationWindowContinuity {
     }
 }
 
-enum AuthenticationWindowAccessibilityFallback {
+enum AuthenticationWindowFrontmostCandidateResolver {
     static func resolve(
+        frontmostProcessID: pid_t?,
         coreGraphicsCandidates: [AuthenticationWindowSnapshot],
-        accessibilityCandidate: AuthenticationWindowSnapshot?
+        accessibilityCandidateForProcess: (pid_t) -> AuthenticationWindowSnapshot?,
+        coreGraphicsCandidateIsFocused: (AuthenticationWindowSnapshot) -> Bool
     ) -> AuthenticationWindowSnapshot? {
-        guard let accessibilityCandidate else {
+        guard !coreGraphicsCandidates.isEmpty else {
+            guard let frontmostProcessID else {
+                return nil
+            }
+            return validAccessibilityCandidate(
+                accessibilityCandidateForProcess(frontmostProcessID),
+                processID: frontmostProcessID
+            )
+        }
+
+        var probedAccessibilityProcessIDs = Set<pid_t>()
+
+        for coreGraphicsCandidate in coreGraphicsCandidates {
+            switch coreGraphicsCandidate.surfaceKind {
+            case .securityAgent:
+                if coreGraphicsCandidateIsFocused(coreGraphicsCandidate) {
+                    return coreGraphicsCandidate
+                }
+            case .localAuthentication:
+                let processID = coreGraphicsCandidate.processID
+                guard probedAccessibilityProcessIDs.insert(processID).inserted else {
+                    continue
+                }
+                if let accessibilityCandidate = validAccessibilityCandidate(
+                    accessibilityCandidateForProcess(processID),
+                    processID: processID
+                ) {
+                    // Core Graphics supplies the front-to-back slot. AX
+                    // supplies the canonical identity for that presenter.
+                    return accessibilityCandidate
+                }
+            case .terminalPassword:
+                continue
+            }
+        }
+        return nil
+    }
+
+    private static func validAccessibilityCandidate(
+        _ candidate: AuthenticationWindowSnapshot?,
+        processID: pid_t
+    ) -> AuthenticationWindowSnapshot? {
+        guard let candidate,
+              candidate.processID == processID,
+              candidate.surfaceKind == .localAuthentication else {
             return nil
         }
-        // Local Authentication can host several centered prompts in one long-
-        // lived presenter process. Core Graphics cannot identify which of its
-        // same-frame windows is focused, while AX supplies a stable per-window
-        // identity. Keep AX canonical whenever it is available; downgrading a
-        // unique match to a CGWindowID would discard that identity and make a
-        // later topmost prompt look like the same window.
-        _ = coreGraphicsCandidates
-        return accessibilityCandidate
+        return candidate
     }
 }
 
 enum AuthenticationWindowSnapshotFactory {
+    static func focusedAccessibilitySnapshot(
+        processID: pid_t,
+        executablePath: String?,
+        focusedWindowReference: () -> AccessibilityWindowReference?,
+        displays: [DisplayGeometry]
+    ) -> AuthenticationWindowSnapshot? {
+        guard AuthenticationPresenterMatcher.kind(
+            bundleIdentifier: nil,
+            executablePath: executablePath
+        ) == .localAuthentication,
+        let reference = focusedWindowReference() else {
+            return nil
+        }
+        return accessibilitySnapshot(
+            processID: processID,
+            elementIdentifier: reference.elementIdentifier,
+            bundleIdentifier: nil,
+            executablePath: executablePath,
+            focusedFrame: reference.frame,
+            displays: displays
+        )
+    }
+
     static func accessibilitySnapshot(
         processID: pid_t,
         elementIdentifier: UInt,
@@ -672,24 +734,26 @@ enum AuthenticationWindowLocator {
     ) -> AuthenticationWindowSnapshot? {
         let candidates = coreGraphicsCandidates ?? onScreenCoreGraphicsCandidates()
 
-        if let candidate = AuthenticationWindowAccessibilityFallback.resolve(
+        if let candidate = AuthenticationWindowFrontmostCandidateResolver.resolve(
+            frontmostProcessID: frontmostProcessID,
             coreGraphicsCandidates: candidates,
-            accessibilityCandidate: accessibilityCandidate(
-                frontmostProcessID: frontmostProcessID
-            )
+            accessibilityCandidateForProcess: { processID in
+                accessibilityCandidate(processID: processID)
+            },
+            coreGraphicsCandidateIsFocused: { candidate in
+                AuthenticationCoreGraphicsFocusFallbackPolicy.permits(candidate)
+                    && isFocused(candidate)
+            }
         ) {
             return candidate
         }
-        return candidates.first {
-            AuthenticationCoreGraphicsFocusFallbackPolicy.permits($0)
-                && isFocused($0)
-        }
+        return nil
     }
 
     static func frontmostAccessibilityCandidate(
         processID: pid_t?
     ) -> AuthenticationWindowSnapshot? {
-        accessibilityCandidate(frontmostProcessID: processID)
+        accessibilityCandidate(processID: processID)
     }
 
     static func snapshot(identity: AuthenticationWindowIdentity) -> AuthenticationWindowSnapshot? {
@@ -828,16 +892,22 @@ enum AuthenticationWindowLocator {
     }
 
     private static func accessibilityCandidate(
-        frontmostProcessID: pid_t?
+        processID: pid_t?
     ) -> AuthenticationWindowSnapshot? {
-        guard let frontmostProcessID else {
+        guard let processID else {
             return nil
         }
-        guard let snapshot = accessibilitySnapshot(processID: frontmostProcessID),
-              isFocused(snapshot) else {
-            return nil
-        }
-        return snapshot
+        let verifiedExecutablePath = executablePath(for: processID)
+        return AuthenticationWindowSnapshotFactory.focusedAccessibilitySnapshot(
+            processID: processID,
+            executablePath: verifiedExecutablePath,
+            focusedWindowReference: {
+                AccessibilityFocusReader.focusedWindowReference(
+                    processID: processID
+                )
+            },
+            displays: currentDisplays()
+        )
     }
 
     private static func isFocused(_ snapshot: AuthenticationWindowSnapshot) -> Bool {
@@ -845,22 +915,6 @@ enum AuthenticationWindowLocator {
             processID: snapshot.processID,
             matchingCoreGraphicsFrame: snapshot.coreGraphicsFrame
         ) == true
-    }
-
-    private static func accessibilitySnapshot(
-        processID: pid_t
-    ) -> AuthenticationWindowSnapshot? {
-        guard let reference = AccessibilityFocusReader.focusedWindowReference(
-            processID: processID
-        ) else {
-            return nil
-        }
-        return accessibilitySnapshot(
-            processID: processID,
-            elementIdentifier: reference.elementIdentifier,
-            frame: reference.frame,
-            bundleIdentifier: nil
-        )
     }
 
     private static func accessibilitySnapshot(

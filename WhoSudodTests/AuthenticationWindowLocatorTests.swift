@@ -200,6 +200,52 @@ final class AuthenticationWindowLocatorTests: XCTestCase {
         )
     }
 
+    func testFocusedAccessibilitySnapshotValidatesPathBeforeReadingAX() {
+        var focusedWindowReadCount = 0
+
+        XCTAssertNil(
+            AuthenticationWindowSnapshotFactory.focusedAccessibilitySnapshot(
+                processID: 321,
+                executablePath: "/tmp/coreautha",
+                focusedWindowReference: {
+                    focusedWindowReadCount += 1
+                    return AccessibilityWindowReference(
+                        elementIdentifier: 17,
+                        frame: CGRect(x: 100, y: 200, width: 260, height: 289)
+                    )
+                },
+                displays: [display]
+            )
+        )
+        XCTAssertEqual(focusedWindowReadCount, 0)
+    }
+
+    func testFocusedAccessibilitySnapshotReadsFocusedWindowOnce() throws {
+        var focusedWindowReadCount = 0
+
+        let snapshot = try XCTUnwrap(
+            AuthenticationWindowSnapshotFactory.focusedAccessibilitySnapshot(
+                processID: 321,
+                executablePath: AuthenticationPresenterMatcher.coreAuthenticationPath,
+                focusedWindowReference: {
+                    focusedWindowReadCount += 1
+                    return AccessibilityWindowReference(
+                        elementIdentifier: 17,
+                        frame: CGRect(x: 100, y: 200, width: 260, height: 289)
+                    )
+                },
+                displays: [display]
+            )
+        )
+
+        XCTAssertEqual(focusedWindowReadCount, 1)
+        XCTAssertEqual(
+            snapshot.identity,
+            .accessibility(processID: 321, elementIdentifier: 17)
+        )
+        XCTAssertEqual(snapshot.surfaceKind, .localAuthentication)
+    }
+
     func testDoesNotMergeUnprovenCoreGraphicsAndAccessibilityIdentities() {
         let frame = CGRect(x: 100, y: 200, width: 260, height: 289)
         let coreGraphics = authenticationWindow(
@@ -247,7 +293,7 @@ final class AuthenticationWindowLocatorTests: XCTestCase {
         )
     }
 
-    func testAccessibilityFallbackKeepsFocusedAXIdentityForUniqueCoreGraphicsMatch() throws {
+    func testFrontmostResolverDoesNotProbeUnrelatedFrontmostPIDWhenCGCandidatesExist() {
         let frame = CGRect(x: 100, y: 200, width: 260, height: 289)
         let coreGraphics = authenticationWindow(
             identity: .coreGraphics(44),
@@ -259,17 +305,29 @@ final class AuthenticationWindowLocatorTests: XCTestCase {
             processID: 321,
             frame: frame.offsetBy(dx: 1, dy: -1)
         )
+        var probedProcessIDs: [pid_t] = []
 
         XCTAssertEqual(
-            AuthenticationWindowAccessibilityFallback.resolve(
+            AuthenticationWindowFrontmostCandidateResolver.resolve(
+                frontmostProcessID: 654,
                 coreGraphicsCandidates: [coreGraphics],
-                accessibilityCandidate: accessibility
+                accessibilityCandidateForProcess: { processID in
+                    probedProcessIDs.append(processID)
+                    return processID == accessibility.processID
+                        ? accessibility
+                        : nil
+                },
+                coreGraphicsCandidateIsFocused: { _ in
+                    XCTFail("Local Authentication must use its AX identity")
+                    return false
+                }
             ),
             accessibility
         )
+        XCTAssertEqual(probedProcessIDs, [321])
     }
 
-    func testAccessibilityFallbackUsesFocusedAXIdentityForAmbiguousSameFrameWindows() {
+    func testFrontmostResolverProbesDuplicatePresenterWindowsOnce() {
         let frame = CGRect(x: 100, y: 200, width: 260, height: 289)
         let first = authenticationWindow(
             identity: .coreGraphics(44),
@@ -281,55 +339,223 @@ final class AuthenticationWindowLocatorTests: XCTestCase {
             processID: 321,
             frame: frame
         )
+        var probedProcessIDs: [pid_t] = []
+
+        XCTAssertNil(
+            AuthenticationWindowFrontmostCandidateResolver.resolve(
+                frontmostProcessID: nil,
+                coreGraphicsCandidates: [first, second],
+                accessibilityCandidateForProcess: { processID in
+                    probedProcessIDs.append(processID)
+                    return nil
+                },
+                coreGraphicsCandidateIsFocused: { _ in
+                    XCTFail("Local Authentication must use its AX identity")
+                    return false
+                }
+            )
+        )
+        XCTAssertEqual(probedProcessIDs, [321])
+    }
+
+    func testFrontmostResolverKeepsLocalAuthenticationAheadOfSecurityAgent() {
+        let frame = CGRect(x: 100, y: 200, width: 260, height: 289)
+        let localAuthentication = authenticationWindow(
+            identity: .coreGraphics(44),
+            processID: 321,
+            frame: frame
+        )
+        let securityAgent = authenticationWindow(
+            identity: .coreGraphics(45),
+            processID: 654,
+            surfaceKind: .securityAgent,
+            frame: frame.offsetBy(dx: 400, dy: 0)
+        )
         let accessibility = authenticationWindow(
             identity: .accessibility(processID: 321, elementIdentifier: 17),
             processID: 321,
             frame: frame
         )
+        var probedProcessIDs: [pid_t] = []
+        var focusCheckedWindowIDs: [CGWindowID] = []
 
         XCTAssertEqual(
-            AuthenticationWindowAccessibilityFallback.resolve(
-                coreGraphicsCandidates: [first, second],
-                accessibilityCandidate: accessibility
+            AuthenticationWindowFrontmostCandidateResolver.resolve(
+                frontmostProcessID: 777,
+                coreGraphicsCandidates: [localAuthentication, securityAgent],
+                accessibilityCandidateForProcess: { processID in
+                    probedProcessIDs.append(processID)
+                    return accessibility
+                },
+                coreGraphicsCandidateIsFocused: { candidate in
+                    if case let .coreGraphics(windowID) = candidate.identity {
+                        focusCheckedWindowIDs.append(windowID)
+                    }
+                    return true
+                }
             ),
             accessibility
         )
+        XCTAssertEqual(probedProcessIDs, [321])
+        XCTAssertTrue(focusCheckedWindowIDs.isEmpty)
     }
 
-    func testAccessibilityFallbackUsesAXOnlyWhenNoCoreGraphicsCandidateExists() {
-        let accessibility = authenticationWindow(
-            identity: .accessibility(processID: 321, elementIdentifier: 17),
-            processID: 321,
-            frame: CGRect(x: 100, y: 200, width: 260, height: 289)
-        )
-
-        XCTAssertEqual(
-            AuthenticationWindowAccessibilityFallback.resolve(
-                coreGraphicsCandidates: [],
-                accessibilityCandidate: accessibility
-            ),
-            accessibility
-        )
-    }
-
-    func testUnrelatedCoreGraphicsPromptDoesNotBlockFocusedAccessibilityPrompt() {
-        let accessibility = authenticationWindow(
-            identity: .accessibility(processID: 321, elementIdentifier: 17),
-            processID: 321,
-            frame: CGRect(x: 100, y: 200, width: 260, height: 289)
-        )
-        let unrelated = authenticationWindow(
+    func testFrontmostResolverKeepsSecurityAgentAheadOfLocalAuthentication() {
+        let frame = CGRect(x: 100, y: 200, width: 260, height: 289)
+        let securityAgent = authenticationWindow(
             identity: .coreGraphics(44),
             processID: 654,
-            frame: CGRect(x: 500, y: 200, width: 260, height: 289)
+            surfaceKind: .securityAgent,
+            frame: frame
         )
+        let localAuthentication = authenticationWindow(
+            identity: .coreGraphics(45),
+            processID: 321,
+            frame: frame.offsetBy(dx: 400, dy: 0)
+        )
+        var probedProcessIDs: [pid_t] = []
+        var focusCheckedWindowIDs: [CGWindowID] = []
 
         XCTAssertEqual(
-            AuthenticationWindowAccessibilityFallback.resolve(
-                coreGraphicsCandidates: [unrelated],
-                accessibilityCandidate: accessibility
+            AuthenticationWindowFrontmostCandidateResolver.resolve(
+                frontmostProcessID: 777,
+                coreGraphicsCandidates: [securityAgent, localAuthentication],
+                accessibilityCandidateForProcess: { processID in
+                    probedProcessIDs.append(processID)
+                    return nil
+                },
+                coreGraphicsCandidateIsFocused: { candidate in
+                    if case let .coreGraphics(windowID) = candidate.identity {
+                        focusCheckedWindowIDs.append(windowID)
+                    }
+                    return true
+                }
+            ),
+            securityAgent
+        )
+        XCTAssertTrue(probedProcessIDs.isEmpty)
+        XCTAssertEqual(focusCheckedWindowIDs, [44])
+    }
+
+    func testFrontmostResolverContinuesPastUnfocusedSecurityAgent() {
+        let frame = CGRect(x: 100, y: 200, width: 260, height: 289)
+        let securityAgent = authenticationWindow(
+            identity: .coreGraphics(44),
+            processID: 654,
+            surfaceKind: .securityAgent,
+            frame: frame
+        )
+        let localAuthentication = authenticationWindow(
+            identity: .coreGraphics(45),
+            processID: 321,
+            frame: frame.offsetBy(dx: 400, dy: 0)
+        )
+        let accessibility = authenticationWindow(
+            identity: .accessibility(processID: 321, elementIdentifier: 17),
+            processID: 321,
+            frame: localAuthentication.frame
+        )
+        var probedProcessIDs: [pid_t] = []
+
+        XCTAssertEqual(
+            AuthenticationWindowFrontmostCandidateResolver.resolve(
+                frontmostProcessID: 777,
+                coreGraphicsCandidates: [securityAgent, localAuthentication],
+                accessibilityCandidateForProcess: { processID in
+                    probedProcessIDs.append(processID)
+                    return accessibility
+                },
+                coreGraphicsCandidateIsFocused: { _ in
+                    false
+                }
             ),
             accessibility
+        )
+        XCTAssertEqual(probedProcessIDs, [321])
+    }
+
+    func testFrontmostResolverContinuesPastLocalAuthenticationWithoutAXIdentity() {
+        let frame = CGRect(x: 100, y: 200, width: 260, height: 289)
+        let localAuthentication = authenticationWindow(
+            identity: .coreGraphics(44),
+            processID: 321,
+            frame: frame
+        )
+        let securityAgent = authenticationWindow(
+            identity: .coreGraphics(45),
+            processID: 654,
+            surfaceKind: .securityAgent,
+            frame: frame.offsetBy(dx: 400, dy: 0)
+        )
+        var probedProcessIDs: [pid_t] = []
+
+        XCTAssertEqual(
+            AuthenticationWindowFrontmostCandidateResolver.resolve(
+                frontmostProcessID: 777,
+                coreGraphicsCandidates: [localAuthentication, securityAgent],
+                accessibilityCandidateForProcess: { processID in
+                    probedProcessIDs.append(processID)
+                    return nil
+                },
+                coreGraphicsCandidateIsFocused: { candidate in
+                    candidate == securityAgent
+                }
+            ),
+            securityAgent
+        )
+        XCTAssertEqual(probedProcessIDs, [321])
+    }
+
+    func testFrontmostResolverUsesAXForFrontmostPIDOnlyWithoutCGCandidates() {
+        let accessibility = authenticationWindow(
+            identity: .accessibility(processID: 321, elementIdentifier: 17),
+            processID: 321,
+            frame: CGRect(x: 100, y: 200, width: 260, height: 289)
+        )
+        var probedProcessIDs: [pid_t] = []
+
+        XCTAssertEqual(
+            AuthenticationWindowFrontmostCandidateResolver.resolve(
+                frontmostProcessID: 321,
+                coreGraphicsCandidates: [],
+                accessibilityCandidateForProcess: { processID in
+                    probedProcessIDs.append(processID)
+                    return accessibility
+                },
+                coreGraphicsCandidateIsFocused: { _ in
+                    XCTFail("There is no Core Graphics candidate")
+                    return false
+                }
+            ),
+            accessibility
+        )
+        XCTAssertEqual(probedProcessIDs, [321])
+    }
+
+    func testFrontmostResolverRejectsInvalidAccessibilityCandidate() {
+        let coreGraphics = authenticationWindow(
+            identity: .coreGraphics(44),
+            processID: 321,
+            frame: CGRect(x: 100, y: 200, width: 260, height: 289)
+        )
+        let wrongProcess = authenticationWindow(
+            identity: .accessibility(processID: 654, elementIdentifier: 17),
+            processID: 654,
+            frame: coreGraphics.frame
+        )
+
+        XCTAssertNil(
+            AuthenticationWindowFrontmostCandidateResolver.resolve(
+                frontmostProcessID: nil,
+                coreGraphicsCandidates: [coreGraphics],
+                accessibilityCandidateForProcess: { _ in
+                    wrongProcess
+                },
+                coreGraphicsCandidateIsFocused: { _ in
+                    XCTFail("Local Authentication must use its AX identity")
+                    return false
+                }
+            )
         )
     }
 
@@ -740,12 +966,13 @@ final class AuthenticationWindowLocatorTests: XCTestCase {
     private func authenticationWindow(
         identity: AuthenticationWindowIdentity,
         processID: pid_t,
+        surfaceKind: AuthenticationSurfaceKind = .localAuthentication,
         frame: CGRect
     ) -> AuthenticationWindowSnapshot {
         AuthenticationWindowSnapshot(
             identity: identity,
             processID: processID,
-            surfaceKind: .localAuthentication,
+            surfaceKind: surfaceKind,
             coreGraphicsFrame: frame,
             frame: frame,
             visibleFrame: display.visibleFrame
