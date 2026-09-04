@@ -61,7 +61,8 @@ enum TerminalPromptObservationResolution: Equatable {
         currentMissConfirmed: Bool
     ) -> TerminalPromptObservationResolution {
         guard let current else {
-            return active.first.map(Self.select) ?? .noSelection
+            return (active.first ?? observed.first).map(Self.select)
+                ?? .noSelection
         }
         if observed.contains(current) {
             if active.contains(current) {
@@ -75,7 +76,84 @@ enum TerminalPromptObservationResolution: Equatable {
         guard currentMissConfirmed else {
             return .waitForCurrent
         }
-        return active.first.map(Self.select) ?? .endCurrent
+        return (active.first ?? observed.first).map(Self.select)
+            ?? .endCurrent
+    }
+}
+
+struct TerminalPromptSuppressionState {
+    private(set) var userDismissed: Set<ProcessIdentity> = []
+    private(set) var completedPAMRequests: Set<ProcessIdentity> = []
+
+    func allowsVerifiedPAMRequest(_ identity: ProcessIdentity) -> Bool {
+        !userDismissed.contains(identity)
+    }
+
+    func suppressesHeuristicPrompt(_ identity: ProcessIdentity) -> Bool {
+        userDismissed.contains(identity) || completedPAMRequests.contains(identity)
+    }
+
+    func suppressesActivePAMRequest(_ identity: ProcessIdentity) -> Bool {
+        userDismissed.contains(identity)
+    }
+
+    mutating func beginVerifiedPAMRequest(_ identity: ProcessIdentity) -> Bool {
+        guard allowsVerifiedPAMRequest(identity) else {
+            return false
+        }
+        completedPAMRequests.remove(identity)
+        return true
+    }
+
+    mutating func recordPAMCompletion(_ identity: ProcessIdentity) {
+        completedPAMRequests.insert(identity)
+    }
+
+    mutating func recordUserDismissal(_ identity: ProcessIdentity) {
+        userDismissed.insert(identity)
+    }
+
+    mutating func refresh(
+        observed: Set<ProcessIdentity>,
+        isRunning: (ProcessIdentity) -> Bool
+    ) {
+        let shouldRetain: (ProcessIdentity) -> Bool = {
+            observed.contains($0) || isRunning($0)
+        }
+        userDismissed = Set(userDismissed.filter(shouldRetain))
+        completedPAMRequests = Set(completedPAMRequests.filter(shouldRetain))
+    }
+
+    mutating func removeAll() {
+        userDismissed.removeAll()
+        completedPAMRequests.removeAll()
+    }
+}
+
+enum PAMRequestReplacementPolicy {
+    static func canSupersede(
+        activeRequest: PAMPasswordRequest,
+        activeIdentity: ProcessIdentity,
+        incomingRequest: PAMPasswordRequest,
+        currentIdentity: ProcessIdentity?
+    ) -> Bool {
+        activeRequest.identifier != incomingRequest.identifier
+            && activeRequest.processID == incomingRequest.processID
+            && activeRequest.realUserID == incomingRequest.realUserID
+            && activeIdentity.pid == incomingRequest.processID
+            && currentIdentity == activeIdentity
+    }
+}
+
+enum AuthenticationCompletionHistory {
+    static func recordBegin(
+        _ requestIdentifier: AuthenticationRequestIdentifier?,
+        in completedRequests: inout [AuthenticationRequestIdentifier: Date]
+    ) {
+        guard let requestIdentifier else {
+            return
+        }
+        completedRequests.removeValue(forKey: requestIdentifier)
     }
 }
 
@@ -103,6 +181,48 @@ enum AuthenticationWindowRecovery {
     }
 }
 
+enum AuthenticationWindowAbsenceResolution: Equatable {
+    case retain
+    case countMiss
+    case endImmediately
+
+    static func resolve(
+        presenterIsRunning: Bool,
+        presenterIsActive: Bool,
+        requesterIsFrontmost: Bool
+    ) -> AuthenticationWindowAbsenceResolution {
+        guard presenterIsRunning else {
+            return .endImmediately
+        }
+        return presenterIsActive || requesterIsFrontmost
+            ? .countMiss
+            : .retain
+    }
+}
+
+enum SystemPromptTeardownPolicy {
+    static func shouldEnd(
+        requestHasCompleted: Bool,
+        requesterIsRunning: Bool,
+        promptIsObserved: Bool
+    ) -> Bool {
+        requestHasCompleted || (!requesterIsRunning && !promptIsObserved)
+    }
+
+    static func shouldEnd(
+        requestHasCompleted: Bool,
+        requesterIsRunning: Bool,
+        promptKey: AuthenticationPromptSessionKey,
+        observedPromptKeys: Set<AuthenticationPromptSessionKey>
+    ) -> Bool {
+        shouldEnd(
+            requestHasCompleted: requestHasCompleted,
+            requesterIsRunning: requesterIsRunning,
+            promptIsObserved: observedPromptKeys.contains(promptKey)
+        )
+    }
+}
+
 enum AuthenticationWindowFocusTransition: Equatable {
     case samePrompt(AuthenticationWindowSnapshot)
     case differentPrompt(AuthenticationWindowSnapshot)
@@ -121,19 +241,35 @@ enum AuthenticationWindowFocusTransition: Equatable {
                 ? .samePrompt(candidate)
                 : .differentPrompt(candidate)
         }
-        if AuthenticationWindowContinuity.representsSamePrompt(current, candidate) {
+        if AuthenticationWindowContinuity.representsSamePrompt(
+            current,
+            candidate
+        ) {
             return .samePrompt(candidate)
         }
         return .differentPrompt(candidate)
     }
+}
 
-    var hidesCurrentPanel: Bool {
-        switch self {
-        case .samePrompt, .differentPrompt:
-            false
-        case .noCandidate:
-            true
+enum CoveredSystemPromptSelection {
+    static func replacement(
+        frontmost: AuthenticationWindowSnapshot?,
+        observed: [AuthenticationWindowSnapshot],
+        coveredKeys: [AuthenticationPromptSessionKey],
+        excluding endedKey: AuthenticationPromptSessionKey
+    ) -> AuthenticationWindowSnapshot? {
+        if let frontmost,
+           AuthenticationPromptSessionKey(window: frontmost) != endedKey {
+            return frontmost
         }
+        for key in coveredKeys.reversed() where key != endedKey {
+            if let match = observed.first(where: {
+                AuthenticationPromptSessionKey(window: $0) == key
+            }) {
+                return match
+            }
+        }
+        return nil
     }
 }
 
@@ -169,6 +305,102 @@ enum AuthenticationEvidenceSelection {
     }
 }
 
+enum AuthenticationRequestAssociation {
+    static func unassignedActiveIdentifier(
+        requesterProcessID: pid_t,
+        evidence: [AuthenticationClientEvent],
+        completedIdentifiers: Set<AuthenticationRequestIdentifier>,
+        existingMappings: [
+            AuthenticationPromptSessionKey: AuthenticationRequestIdentifier
+        ],
+        promptKey: AuthenticationPromptSessionKey
+    ) -> AuthenticationRequestIdentifier? {
+        let identifiersUsedByOtherPrompts = Set(
+            existingMappings.compactMap { key, identifier in
+                key == promptKey ? nil : identifier
+            }
+        )
+        let eligibleIdentifiers = Set(
+            evidence.compactMap { event -> AuthenticationRequestIdentifier? in
+                guard event.processID == requesterProcessID,
+                      let identifier = event.requestIdentifier,
+                      !completedIdentifiers.contains(identifier),
+                      !identifiersUsedByOtherPrompts.contains(identifier) else {
+                    return nil
+                }
+                return identifier
+            }
+        )
+        guard eligibleIdentifiers.count == 1 else {
+            return nil
+        }
+        return eligibleIdentifiers.first
+    }
+
+    static func unassignedCompletedIdentifier(
+        requesterProcessID: pid_t,
+        evidence: [AuthenticationClientEvent],
+        currentEvidence: [AuthenticationClientEvent],
+        completedIdentifiers: Set<AuthenticationRequestIdentifier>,
+        existingMappings: [
+            AuthenticationPromptSessionKey: AuthenticationRequestIdentifier
+        ],
+        promptKey: AuthenticationPromptSessionKey
+    ) -> AuthenticationRequestIdentifier? {
+        let identifiersUsedByOtherPrompts = Set(
+            existingMappings.compactMap { key, identifier in
+                key == promptKey ? nil : identifier
+            }
+        )
+        let matchingIdentifiers = Set(
+            evidence.compactMap { event -> AuthenticationRequestIdentifier? in
+                guard event.processID == requesterProcessID,
+                      let identifier = event.requestIdentifier,
+                      !identifiersUsedByOtherPrompts.contains(identifier) else {
+                    return nil
+                }
+                return identifier
+            }
+        )
+        guard matchingIdentifiers.count == 1,
+              let identifier = matchingIdentifiers.first,
+              completedIdentifiers.contains(identifier) else {
+            return nil
+        }
+        let competingActiveIdentifierExists = currentEvidence.contains { event in
+            guard event.processID == requesterProcessID else {
+                return false
+            }
+            guard let currentIdentifier = event.requestIdentifier else {
+                return true
+            }
+            return currentIdentifier != identifier
+                && !completedIdentifiers.contains(currentIdentifier)
+        }
+        guard !competingActiveIdentifierExists else {
+            return nil
+        }
+        return identifier
+    }
+
+    static func transferMapping(
+        in mappings: inout [
+            AuthenticationPromptSessionKey: AuthenticationRequestIdentifier
+        ],
+        from oldKey: AuthenticationPromptSessionKey,
+        to newKey: AuthenticationPromptSessionKey
+    ) {
+        guard oldKey != newKey else {
+            return
+        }
+        let previousIdentifier = mappings.removeValue(forKey: oldKey)
+        if mappings[newKey] == nil,
+           let previousIdentifier {
+            mappings[newKey] = previousIdentifier
+        }
+    }
+}
+
 @MainActor
 final class AuthorizationPromptMonitor: NSObject {
     private static let securityAgentShownNotification = Notification.Name(
@@ -184,10 +416,17 @@ final class AuthorizationPromptMonitor: NSObject {
         let request: PAMPasswordRequest
         let lease: PAMConversationLease
         let snapshot: AuthenticationProcessSnapshot
-        var terminalWindow: TerminalPromptWindowSnapshot
+        var terminalWindow: TerminalPromptWindowSnapshot?
+        let promptSequence: Int
         var offersAppInput: Bool
         let passwordHandler: @MainActor (Data) -> Void
         let useTerminalHandler: @MainActor () -> Void
+    }
+    private struct SuspendedTerminalPrompt {
+        let identity: ProcessIdentity
+        let snapshot: AuthenticationProcessSnapshot
+        let terminalWindow: TerminalPromptWindowSnapshot?
+        let promptSequence: Int
     }
     private lazy var eventMonitor = AuthenticationEventMonitor { [weak self] event in
         self?.recordAuthenticationEvent(event)
@@ -195,6 +434,11 @@ final class AuthorizationPromptMonitor: NSObject {
     private var timer: Timer?
     private var target: AuthenticationWindowSnapshot?
     private var promptSessions = AuthenticationPromptSessionStore()
+    private var coveredSystemPromptKeys: [AuthenticationPromptSessionKey] = []
+    private var requestIdentifiersByPromptKey: [
+        AuthenticationPromptSessionKey: AuthenticationRequestIdentifier
+    ] = [:]
+    private var completedRequestIdentifiers: [AuthenticationRequestIdentifier: Date] = [:]
     private var targetFirstSeenAt: Date?
     private var recentEvents: [AuthenticationClientEvent] = []
     private var lastProcessSnapshot = AuthenticationProcessSnapshot.pending
@@ -214,23 +458,34 @@ final class AuthorizationPromptMonitor: NSObject {
     private var lastReportedStatus: AuthorizationMonitorStatus?
     private var fastCoreGraphicsDiscoveryUntil: TimeInterval = 0
     private var frontmostApplicationProcessID: pid_t?
+    private var activeNotchVisibleFrame: CGRect?
+    private var nextActiveNotchScreenCheckTime: TimeInterval = 0
     private var isCurrentSystemPromptIgnored = false
     private var activePAMPasswordRequest: ActivePAMPasswordRequest?
     private var pendingPAMPasswordRequestIdentifier: PAMRequestIdentifier?
+    private var terminalPromptSuppression = TerminalPromptSuppressionState()
+    private var suspendedTerminalPrompt: SuspendedTerminalPrompt?
 
     init(
         displayMode: ProcessDisplayMode = .simple,
         ignoredApplications: IgnoredApplicationsStore,
         displayModeRequestHandler: @escaping (ProcessDisplayMode) -> Void = { _ in },
+        pamSetupActionProvider: @escaping @MainActor () -> PAMNotchAction? = { nil },
+        pamSetupActionHandler: @escaping @MainActor (PAMSettingsAction) -> Void = { _ in },
         statusHandler: @escaping (AuthorizationMonitorStatus) -> Void
     ) {
         panel = ProcessTreePanelController(
             displayMode: displayMode,
-            displayModeRequestHandler: displayModeRequestHandler
+            displayModeRequestHandler: displayModeRequestHandler,
+            pamSetupActionProvider: pamSetupActionProvider,
+            pamSetupActionHandler: pamSetupActionHandler
         )
         self.ignoredApplications = ignoredApplications
         self.statusHandler = statusHandler
         super.init()
+        panel.onNotchDismissRequest = { [weak self] in
+            self?.dismissVisibleNotch()
+        }
     }
 
     func setDisplayMode(_ mode: ProcessDisplayMode) {
@@ -245,17 +500,40 @@ final class AuthorizationPromptMonitor: NSObject {
     ) async -> Bool {
         guard lease.isActive,
               AccessibilityFocusReader.isTrusted,
-              target == nil,
               PAMPromptPolicy.isAccountPasswordPrompt(request.prompt) else {
             return false
         }
         if let active = activePAMPasswordRequest {
-            return active.request.identifier == request.identifier
-                && active.offersAppInput
+            if active.request.identifier == request.identifier {
+                return active.offersAppInput
+            }
+            guard let activeIdentity = active.snapshot.candidates.first?
+                .requesterProcess.identity,
+                  PAMRequestReplacementPolicy.canSupersede(
+                      activeRequest: active.request,
+                      activeIdentity: activeIdentity,
+                      incomingRequest: request,
+                      currentIdentity: ProcessIdentityLiveness.currentIdentity(
+                          processID: request.processID
+                      )
+                  ) else {
+                return false
+            }
+            panel.dismissVerifiedPAMPasswordRequest(active.request.identifier.uuid)
+            activePAMPasswordRequest = nil
+            logger.notice(
+                "Superseding a completed PAM conversation for PID \(request.processID, privacy: .public)"
+            )
         }
         guard pendingPAMPasswordRequestIdentifier == nil else {
             return false
         }
+        let retainedTerminalIdentity = terminalPromptIdentity
+        let retainedTerminalWindow = terminalPromptWindow
+            ?? frontmostApplicationProcessID.flatMap {
+                TerminalPromptWindowLocator.focusedWindow(processID: $0)
+            }
+        let retainedPromptSequence = promptSequence
         pendingPAMPasswordRequestIdentifier = request.identifier
         defer {
             if pendingPAMPasswordRequestIdentifier == request.identifier {
@@ -269,75 +547,107 @@ final class AuthorizationPromptMonitor: NSObject {
         )
         guard pendingPAMPasswordRequestIdentifier == request.identifier,
               lease.isActive,
-              target == nil,
               activePAMPasswordRequest == nil,
               let unfilteredChain = observed.candidates.first,
-              unfilteredChain.requesterProcess.pid == request.processID else {
+              unfilteredChain.requesterProcess.pid == request.processID,
+              terminalPromptSuppression.allowsVerifiedPAMRequest(
+                  unfilteredChain.requesterProcess.identity
+              ) else {
             return false
         }
         let filtered = IgnoredApplicationsPolicy.filtering(
             observed,
             by: ignoredApplications.rules
         )
+        let chain = filtered.candidates.first
+        let preservedWindow: TerminalPromptWindowSnapshot?
+        if let retainedTerminalWindow,
+           chain?.requesterProcess.identity == retainedTerminalIdentity {
+            preservedWindow = retainedTerminalWindow
+        } else if let retainedTerminalWindow,
+                  chain?.processes.contains(where: {
+                      $0.pid == retainedTerminalWindow.processID
+                  }) == true {
+            preservedWindow = retainedTerminalWindow
+        } else if chain?.requesterProcess.identity == terminalPromptIdentity {
+            preservedWindow = terminalPromptWindow
+        } else if chain?.requesterProcess.identity == suspendedTerminalPrompt?.identity {
+            preservedWindow = suspendedTerminalPrompt?.terminalWindow
+        } else {
+            preservedWindow = nil
+        }
         guard pendingPAMPasswordRequestIdentifier == request.identifier,
               lease.isActive,
               activePAMPasswordRequest == nil,
-              let chain = filtered.candidates.first,
-              let terminalWindow = TerminalPromptWindowLocator.focusedWindow(for: chain) else {
+              let chain else {
             return false
         }
+        let terminalWindow = TerminalPromptWindowLocator.retainedWindow(
+            for: chain,
+            preserving: preservedWindow
+        )
 
         guard pendingPAMPasswordRequestIdentifier == request.identifier,
               lease.isActive,
-              activePAMPasswordRequest == nil else {
+              activePAMPasswordRequest == nil,
+              terminalPromptSuppression.beginVerifiedPAMRequest(
+                  chain.requesterProcess.identity
+              ) else {
             return false
         }
 
-        cancelProcessScan()
         cancelTerminalPromptScan()
         terminalPromptStability.recordConfirmation()
-        terminalPromptIdentity = chain.requesterProcess.identity
-        self.terminalPromptWindow = terminalWindow
-        promptSequence = nextTerminalPromptSequence
-        nextTerminalPromptSequence -= 1
-        lastProcessSnapshot = AuthenticationProcessSnapshot(
+        let passwordPromptSequence: Int
+        if retainedTerminalIdentity == chain.requesterProcess.identity {
+            passwordPromptSequence = retainedPromptSequence
+        } else if terminalPromptIdentity == chain.requesterProcess.identity {
+            passwordPromptSequence = promptSequence
+        } else if let suspendedTerminalPrompt,
+                  suspendedTerminalPrompt.identity == chain.requesterProcess.identity {
+            passwordPromptSequence = suspendedTerminalPrompt.promptSequence
+        } else {
+            passwordPromptSequence = nextTerminalPromptSequence
+            nextTerminalPromptSequence -= 1
+        }
+        let passwordSnapshot = AuthenticationProcessSnapshot(
             candidates: [chain],
             inspectionState: filtered.inspectionState
         )
-        activePAMPasswordRequest = ActivePAMPasswordRequest(
+        suspendedTerminalPrompt = nil
+        let activeRequest = ActivePAMPasswordRequest(
             request: request,
             lease: lease,
-            snapshot: lastProcessSnapshot,
+            snapshot: passwordSnapshot,
             terminalWindow: terminalWindow,
+            promptSequence: passwordPromptSequence,
             offersAppInput: true,
             passwordHandler: passwordHandler,
             useTerminalHandler: useTerminalHandler
         )
-        panel.presentVerifiedPAMPasswordRequest(
-            VerifiedPAMPasswordRequest(id: request.identifier.uuid),
-            onPassword: { [weak self] requestID, password in
-                self?.submitPAMPassword(requestID: requestID, password: password)
-            },
-            onUseTerminal: { [weak self] requestID in
-                self?.useTerminalForPAMRequest(requestID: requestID)
-            }
-        )
-        panel.showStandalone(
-            snapshot: lastProcessSnapshot,
-            promptSequence: promptSequence,
-            anchorFrame: terminalWindow.frame,
-            visibleFrame: terminalWindow.visibleFrame
-        )
+        activePAMPasswordRequest = activeRequest
+        if target == nil {
+            cancelProcessScan()
+            terminalPromptIdentity = chain.requesterProcess.identity
+            self.terminalPromptWindow = terminalWindow
+            promptSequence = passwordPromptSequence
+            lastProcessSnapshot = passwordSnapshot
+            presentPAMPasswordRequest(activeRequest)
+        }
         guard lease.isActive,
               activePAMPasswordRequest?.request.identifier == request.identifier else {
             panel.dismissVerifiedPAMPasswordRequest(request.identifier.uuid)
             if activePAMPasswordRequest?.request.identifier == request.identifier {
                 activePAMPasswordRequest = nil
             }
-            resetTerminalPrompt(hidePanel: true, promptPresent: false)
+            if target == nil {
+                resetTerminalPrompt(hidePanel: true, promptPresent: false)
+            }
             return false
         }
-        report(isShowingPanel: true)
+        if target == nil {
+            report(isShowingPanel: true)
+        }
         logger.notice(
             "Verified PAM password request received for PID \(request.processID, privacy: .public)"
         )
@@ -352,12 +662,18 @@ final class AuthorizationPromptMonitor: NSObject {
               active.request.identifier == requestIdentifier else {
             return
         }
+        if let identity = active.snapshot.candidates.first?.requesterProcess.identity {
+            terminalPromptSuppression.recordPAMCompletion(identity)
+        }
         panel.dismissVerifiedPAMPasswordRequest(requestIdentifier.uuid)
         activePAMPasswordRequest = nil
+        suspendedTerminalPrompt = nil
         logger.notice(
             "Verified PAM password request ended for PID \(active.request.processID, privacy: .public)"
         )
-        resetTerminalPrompt(hidePanel: true, promptPresent: false)
+        if target == nil {
+            resetTerminalPrompt(hidePanel: true, promptPresent: false)
+        }
     }
 
     func start() {
@@ -409,9 +725,13 @@ final class AuthorizationPromptMonitor: NSObject {
         cancelProcessScan()
         cancelTerminalPromptScan()
         pendingPAMPasswordRequestIdentifier = nil
+        terminalPromptSuppression.removeAll()
+        suspendedTerminalPrompt = nil
         abandonActivePAMPasswordRequest()
         resetTerminalPrompt(hidePanel: false, promptPresent: false)
         promptSessions.removeAll()
+        coveredSystemPromptKeys.removeAll()
+        resetAuthenticationEventCorrelation()
         eventMonitor.stop()
         DistributedNotificationCenter.default().removeObserver(self)
         NSWorkspace.shared.notificationCenter.removeObserver(self)
@@ -420,6 +740,28 @@ final class AuthorizationPromptMonitor: NSObject {
             promptPresent: false,
             accessibilityTrusted: AccessibilityFocusReader.isTrusted
         )
+    }
+
+    private func dismissVisibleNotch() {
+        guard panel.isNotchPresented else {
+            return
+        }
+
+        if var active = activePAMPasswordRequest,
+           let identity = active.snapshot.candidates.first?.requesterProcess.identity {
+            terminalPromptSuppression.recordUserDismissal(identity)
+            if active.offersAppInput {
+                active.offersAppInput = false
+                activePAMPasswordRequest = active
+                active.useTerminalHandler()
+            }
+        } else if let terminalPromptIdentity {
+            terminalPromptSuppression.recordUserDismissal(terminalPromptIdentity)
+        }
+
+        panel.hide(promptPresent: true, accessibilityTrusted: true)
+        report(isShowingPanel: false)
+        logger.notice("Notch dismissed by user")
     }
 
     @objc
@@ -452,6 +794,8 @@ final class AuthorizationPromptMonitor: NSObject {
     @objc
     private func screenParametersDidChange() {
         AuthenticationWindowLocator.invalidateDisplayCache()
+        activeNotchVisibleFrame = nil
+        nextActiveNotchScreenCheckTime = 0
         refresh(forceDiscovery: true)
     }
 
@@ -464,7 +808,10 @@ final class AuthorizationPromptMonitor: NSObject {
             target = nil
             terminalPromptIdentity = nil
             terminalPromptWindow = nil
+            suspendedTerminalPrompt = nil
             promptSessions.removeAll()
+            coveredSystemPromptKeys.removeAll()
+            resetAuthenticationEventCorrelation()
             targetFirstSeenAt = nil
             lastProcessSnapshot = .pending
             isCurrentSystemPromptIgnored = false
@@ -478,6 +825,7 @@ final class AuthorizationPromptMonitor: NSObject {
         eventMonitor.start()
 
         let now = ProcessInfo.processInfo.systemUptime
+        updateActiveNotchScreenIfNeeded(now: now, force: forceDiscovery)
         let inspectsCoreGraphics = AuthenticationWindowDiscoveryPolicy
             .shouldInspectCoreGraphics(
                 forceDiscovery: forceDiscovery,
@@ -487,22 +835,40 @@ final class AuthorizationPromptMonitor: NSObject {
                 nextFallbackTime: nextDiscoveryTime
             )
         let frontmostCandidate: AuthenticationWindowSnapshot?
+        let observedSystemWindows: [AuthenticationWindowSnapshot]
         if inspectsCoreGraphics {
             if target == nil {
                 nextDiscoveryTime = now + AuthenticationWindowDiscoveryPolicy.fallbackInterval
             }
             let observationDate = Date()
+            var preservedPromptKeys = Set(coveredSystemPromptKeys)
+            if let target {
+                preservedPromptKeys.insert(
+                    AuthenticationPromptSessionKey(window: target)
+                )
+            }
             let visibleCoreGraphicsWindows = AuthenticationWindowLocator
                 .onScreenCoreGraphicsCandidates()
             promptSessions.observeVisibleCoreGraphicsWindows(
                 visibleCoreGraphicsWindows,
-                at: observationDate
+                at: observationDate,
+                preserving: preservedPromptKeys
             )
             let visibleAccessibilityWindows = promptSessions.accessibilityWindowIdentities
                 .compactMap { AuthenticationWindowLocator.snapshot(identity: $0) }
             promptSessions.observeVisibleAccessibilityWindows(
                 visibleAccessibilityWindows,
-                at: observationDate
+                at: observationDate,
+                preserving: preservedPromptKeys
+            )
+            observedSystemWindows = visibleCoreGraphicsWindows
+                + visibleAccessibilityWindows
+            pruneCoveredSystemPrompts(
+                observedPromptKeys: Set(
+                    observedSystemWindows.map(
+                        AuthenticationPromptSessionKey.init(window:)
+                    )
+                )
             )
             frontmostCandidate = AuthenticationWindowLocator.frontmostCandidate(
                 from: visibleCoreGraphicsWindows,
@@ -513,6 +879,7 @@ final class AuthorizationPromptMonitor: NSObject {
                 .frontmostAccessibilityCandidate(
                     processID: frontmostApplicationProcessID
                 )
+            observedSystemWindows = frontmostCandidate.map { [$0] } ?? []
         }
 
         if let currentTarget = target {
@@ -522,6 +889,7 @@ final class AuthorizationPromptMonitor: NSObject {
                     to: frontmostCandidate
                 ) {
                 case let .differentPrompt(candidate):
+                    coverSystemPrompt(currentTarget)
                     activatePrompt(candidate, at: Date())
                     logger.notice(
                         "Authentication window switched to PID \(candidate.processID, privacy: .public)"
@@ -540,14 +908,46 @@ final class AuthorizationPromptMonitor: NSObject {
                 }
             }
 
-            guard let current = AuthenticationWindowLocator.snapshot(identity: currentTarget.identity) else {
-                guard observationStability.recordMiss() else {
+            let current = AuthenticationWindowLocator.snapshot(
+                tracking: currentTarget
+            )
+            if SystemPromptTeardownPolicy.shouldEnd(
+                requestHasCompleted: currentSystemRequestHasCompleted(currentTarget),
+                requesterIsRunning: !currentSystemRequesterHasExited,
+                promptIsObserved: current != nil
+            ) {
+                endSystemPrompt(
+                    currentTarget,
+                    replacementCandidate: frontmostCandidate,
+                    observedCandidates: observedSystemWindows,
+                    now: now
+                )
+                return
+            }
+
+            guard let current else {
+                let absenceResolution = AuthenticationWindowAbsenceResolution.resolve(
+                    presenterIsRunning: AuthenticationWindowLocator
+                        .isPresenterRunning(currentTarget),
+                    presenterIsActive: NSRunningApplication(
+                        processIdentifier: currentTarget.processID
+                    )?.isActive == true,
+                    requesterIsFrontmost: isFrontmostApplicationInCurrentProcessTree
+                )
+                switch absenceResolution {
+                case .retain:
+                    observationStability.reset()
                     return
+                case .countMiss:
+                    guard observationStability.recordMiss() else {
+                        return
+                    }
+                case .endImmediately:
+                    break
                 }
-                let candidate = frontmostCandidate
                 if let replacement = AuthenticationWindowRecovery.continuousReplacement(
                     for: currentTarget,
-                    candidate: candidate
+                    candidate: frontmostCandidate
                 ) {
                     transferPromptSession(from: currentTarget, to: replacement, at: Date())
                     logger.notice(
@@ -556,24 +956,15 @@ final class AuthorizationPromptMonitor: NSObject {
                     updatePanel(for: replacement, now: now)
                     return
                 }
-                logger.notice("Authentication window closed")
-                cancelProcessScan()
-                promptSessions.remove(window: currentTarget)
-                target = nil
-                targetFirstSeenAt = nil
-                lastProcessSnapshot = .pending
-                isCurrentSystemPromptIgnored = false
-                observationStability.reset()
-                if let candidate {
-                    activatePrompt(candidate, at: Date())
-                    updatePanel(for: candidate, now: now)
-                    return
-                }
-                panel.hide(promptPresent: false, accessibilityTrusted: true)
-                nextDiscoveryTime = 0
-                report(isShowingPanel: false)
+                endSystemPrompt(
+                    currentTarget,
+                    replacementCandidate: frontmostCandidate,
+                    observedCandidates: observedSystemWindows,
+                    now: now
+                )
                 return
             }
+            observationStability.recordConfirmation()
             target = current
             promptSessions.touch(window: current, at: Date())
             updatePanel(for: current, now: now)
@@ -582,11 +973,9 @@ final class AuthorizationPromptMonitor: NSObject {
 
         if let active = activePAMPasswordRequest {
             if let candidate = frontmostCandidate {
-                abandonActivePAMPasswordRequest()
-                resetTerminalPrompt(hidePanel: false, promptPresent: true)
                 activatePrompt(candidate, at: Date())
                 logger.notice(
-                    "Authentication window replaced PAM password input for PID \(candidate.processID, privacy: .public)"
+                    "Authentication window temporarily covered PAM password input for PID \(candidate.processID, privacy: .public)"
                 )
                 updatePanel(for: candidate, now: now)
                 return
@@ -597,10 +986,10 @@ final class AuthorizationPromptMonitor: NSObject {
 
         if terminalPromptIdentity != nil {
             if let candidate = frontmostCandidate {
-                resetTerminalPrompt(hidePanel: false, promptPresent: true)
+                suspendTerminalPrompt()
                 activatePrompt(candidate, at: Date())
                 logger.notice(
-                    "Authentication window replaced terminal password prompt for PID \(candidate.processID, privacy: .public)"
+                    "Authentication window temporarily covered terminal password prompt for PID \(candidate.processID, privacy: .public)"
                 )
                 updatePanel(for: candidate, now: now)
                 return
@@ -626,32 +1015,8 @@ final class AuthorizationPromptMonitor: NSObject {
 
     private func updatePanel(
         for window: AuthenticationWindowSnapshot,
-        now: TimeInterval,
-        allowsFocusRecovery: Bool = true
+        now: TimeInterval
     ) {
-        switch isAuthenticationWindowFocused(window) {
-        case true:
-            observationStability.recordConfirmation()
-        case false:
-            observationStability.reset()
-            hideForLostFocus(
-                window: window,
-                now: now,
-                allowsFocusRecovery: allowsFocusRecovery
-            )
-            return
-        case nil:
-            guard observationStability.recordMiss() else {
-                return
-            }
-            hideForLostFocus(
-                window: window,
-                now: now,
-                allowsFocusRecovery: allowsFocusRecovery
-            )
-            return
-        }
-
         if now >= nextProcessScanTime, processScanTask == nil {
             nextProcessScanTime = now + 0.15
             startProcessScan(for: window)
@@ -674,55 +1039,6 @@ final class AuthorizationPromptMonitor: NSObject {
             visibleFrame: window.visibleFrame
         )
         report(isShowingPanel: true)
-    }
-
-    private func hideForLostFocus(
-        window: AuthenticationWindowSnapshot,
-        now: TimeInterval,
-        allowsFocusRecovery: Bool
-    ) {
-        let transition = AuthenticationWindowFocusTransition.resolve(
-            from: window,
-            to: AuthenticationWindowLocator.frontmostCandidate(
-                frontmostProcessID: frontmostApplicationProcessID
-            )
-        )
-        if allowsFocusRecovery,
-           case let .samePrompt(candidate) = transition {
-            transferPromptSession(from: window, to: candidate, at: Date())
-            logger.notice(
-                "Authentication window representation switched for PID \(candidate.processID, privacy: .public)"
-            )
-            updatePanel(
-                for: candidate,
-                now: now,
-                allowsFocusRecovery: false
-            )
-            return
-        }
-
-        if case let .differentPrompt(candidate) = transition {
-            activatePrompt(candidate, at: Date())
-            logger.notice(
-                "Authentication window switched to PID \(candidate.processID, privacy: .public)"
-            )
-            updatePanel(for: candidate, now: now)
-            return
-        }
-
-        cancelProcessScan()
-        target = nil
-        targetFirstSeenAt = nil
-        lastProcessSnapshot = .pending
-        isCurrentSystemPromptIgnored = false
-        observationStability.reset()
-        nextDiscoveryTime = 0
-        let wasPresented = panel.isPresented
-        panel.hide(promptPresent: true, accessibilityTrusted: true)
-        if wasPresented {
-            report(isShowingPanel: false)
-        }
-        startTerminalPromptScanIfNeeded(now: now)
     }
 
     private func startProcessScan(for window: AuthenticationWindowSnapshot) {
@@ -765,6 +1081,34 @@ final class AuthorizationPromptMonitor: NSObject {
             )
             self.isCurrentSystemPromptIgnored = !newSnapshot.candidates.isEmpty
                 && visibleNewSnapshot.candidates.isEmpty
+            let promptKey = AuthenticationPromptSessionKey(window: window)
+            if self.requestIdentifiersByPromptKey[promptKey] == nil,
+               let requesterProcessID = newSnapshot.candidates.first?
+                   .requesterProcess.pid {
+                let completedIdentifiers = Set(
+                    self.completedRequestIdentifiers.keys
+                )
+                let requestIdentifier = AuthenticationRequestAssociation
+                    .unassignedActiveIdentifier(
+                        requesterProcessID: requesterProcessID,
+                        evidence: evidence,
+                        completedIdentifiers: completedIdentifiers,
+                        existingMappings: self.requestIdentifiersByPromptKey,
+                        promptKey: promptKey
+                    )
+                    ?? AuthenticationRequestAssociation
+                        .unassignedCompletedIdentifier(
+                            requesterProcessID: requesterProcessID,
+                            evidence: evidence,
+                            currentEvidence: self.recentEvents,
+                            completedIdentifiers: completedIdentifiers,
+                            existingMappings: self.requestIdentifiersByPromptKey,
+                            promptKey: promptKey
+                        )
+                if let requestIdentifier {
+                    self.requestIdentifiersByPromptKey[promptKey] = requestIdentifier
+                }
+            }
             if refreshedSnapshot != self.lastProcessSnapshot {
                 self.logger.notice(
                     "Process snapshot has \(newSnapshot.candidates.count, privacy: .public) requester candidate(s)"
@@ -775,6 +1119,10 @@ final class AuthorizationPromptMonitor: NSObject {
                     processSnapshot: refreshedSnapshot,
                     at: Date()
                 )
+            }
+            if self.currentSystemRequestHasCompleted(window) {
+                self.refresh(forceDiscovery: true)
+                return
             }
             self.updatePanel(
                 for: window,
@@ -792,24 +1140,30 @@ final class AuthorizationPromptMonitor: NSObject {
             hideTerminalPromptPanel()
             return
         }
-        let focusedWindow = TerminalPromptWindowLocator.focusedWindow(
+        guard !terminalPromptSuppression.suppressesHeuristicPrompt(identity) else {
+            hideTerminalPromptPanel()
+            return
+        }
+        let retainedWindow = TerminalPromptWindowLocator.retainedWindow(
             for: chain,
             preserving: terminalPromptWindow
         )
-        guard let focusedWindow else {
+        self.terminalPromptWindow = retainedWindow
+        guard let presentationVisibleFrame = notchPresentationVisibleFrame(
+            terminalWindow: retainedWindow
+        ) else {
             hideTerminalPromptPanel()
             return
         }
 
-        self.terminalPromptWindow = focusedWindow
-        panel.showStandalone(
+        panel.showNotch(
             snapshot: AuthenticationProcessSnapshot(
                 candidates: [chain],
                 inspectionState: lastProcessSnapshot.inspectionState
             ),
             promptSequence: promptSequence,
-            anchorFrame: focusedWindow.frame,
-            visibleFrame: focusedWindow.visibleFrame
+            anchorFrame: presentationVisibleFrame,
+            visibleFrame: presentationVisibleFrame
         )
         report(isShowingPanel: true)
     }
@@ -825,6 +1179,7 @@ final class AuthorizationPromptMonitor: NSObject {
     private func startTerminalPromptScanIfNeeded(now: TimeInterval) {
         guard target == nil,
               activePAMPasswordRequest == nil,
+              pendingPAMPasswordRequestIdentifier == nil,
               terminalPromptScanTask == nil,
               now >= nextTerminalPromptScanTime else {
             return
@@ -855,7 +1210,19 @@ final class AuthorizationPromptMonitor: NSObject {
                 by: self.ignoredApplications.rules
             )
 
-            let observedIdentities = observed.candidates.map {
+            let allObservedIdentities = Set(observed.candidates.map {
+                $0.requesterProcess.identity
+            })
+            self.terminalPromptSuppression.refresh(
+                observed: allObservedIdentities,
+                isRunning: ProcessIdentityLiveness.isRunning
+            )
+            let eligibleCandidates = observed.candidates.filter { chain in
+                let identity = chain.requesterProcess.identity
+                return identity == self.terminalPromptIdentity
+                    || !self.terminalPromptSuppression.suppressesHeuristicPrompt(identity)
+            }
+            let observedIdentities = eligibleCandidates.map {
                 $0.requesterProcess.identity
             }
             let currentWasObserved = self.terminalPromptIdentity.map {
@@ -870,7 +1237,7 @@ final class AuthorizationPromptMonitor: NSObject {
             }
 
             var activeWindows: [ProcessIdentity: TerminalPromptWindowSnapshot] = [:]
-            for chain in observed.candidates {
+            for chain in eligibleCandidates {
                 let identity = chain.requesterProcess.identity
                 let window: TerminalPromptWindowSnapshot?
                 if identity == self.terminalPromptIdentity {
@@ -898,7 +1265,7 @@ final class AuthorizationPromptMonitor: NSObject {
             switch resolution {
             case .keepCurrent:
                 guard let currentIdentity = self.terminalPromptIdentity,
-                      let chain = observed.candidates.first(where: {
+                      let chain = eligibleCandidates.first(where: {
                           $0.requesterProcess.identity == currentIdentity
                       }) else {
                     return
@@ -914,14 +1281,14 @@ final class AuthorizationPromptMonitor: NSObject {
             case .waitForCurrent:
                 self.updateTerminalPrompt(now: ProcessInfo.processInfo.systemUptime)
             case let .select(identity):
-                guard let chain = observed.candidates.first(where: {
+                guard let chain = eligibleCandidates.first(where: {
                     $0.requesterProcess.identity == identity
-                }), let window = activeWindows[identity] else {
+                }) else {
                     return
                 }
                 self.terminalPromptStability.recordConfirmation()
                 self.terminalPromptIdentity = identity
-                self.terminalPromptWindow = window
+                self.terminalPromptWindow = activeWindows[identity]
                 self.promptSequence = self.nextTerminalPromptSequence
                 self.nextTerminalPromptSequence -= 1
                 self.lastProcessSnapshot = AuthenticationProcessSnapshot(
@@ -941,27 +1308,34 @@ final class AuthorizationPromptMonitor: NSObject {
         }
     }
 
-    private func isAuthenticationWindowFocused(
-        _ window: AuthenticationWindowSnapshot
-    ) -> Bool? {
-        switch window.identity {
-        case .coreGraphics:
-            return AccessibilityFocusReader.isFocusedWindow(
-                processID: window.processID,
-                matchingCoreGraphicsFrame: window.coreGraphicsFrame
+    private func recordAuthenticationEvent(_ lifecycle: AuthenticationLifecycleEvent) {
+        let eventDate: Date
+        switch lifecycle {
+        case let .began(event):
+            eventDate = event.receivedAt
+            AuthenticationCompletionHistory.recordBegin(
+                event.requestIdentifier,
+                in: &completedRequestIdentifiers
             )
-        case .accessibility:
-            return AccessibilityFocusReader.isFocusedWindow(
-                processID: window.processID,
-                matchingCoreGraphicsFrame: window.coreGraphicsFrame
-            )
+            recentEvents.append(event)
+        case let .ended(requestIdentifier, receivedAt):
+            eventDate = receivedAt
+            completedRequestIdentifiers[requestIdentifier] = receivedAt
+            recentEvents.removeAll {
+                $0.requestIdentifier == requestIdentifier
+            }
+        case .reset:
+            nextProcessScanTime = 0
+            beginFastDiscoveryBurst()
+            refresh(forceDiscovery: true)
+            return
         }
-    }
-
-    private func recordAuthenticationEvent(_ event: AuthenticationClientEvent) {
-        recentEvents.append(event)
-        let cutoff = event.receivedAt.addingTimeInterval(-10)
-        recentEvents.removeAll { $0.receivedAt < cutoff }
+        let evidenceCutoff = eventDate.addingTimeInterval(-10)
+        recentEvents.removeAll { $0.receivedAt < evidenceCutoff }
+        let completionCutoff = eventDate.addingTimeInterval(-600)
+        completedRequestIdentifiers = completedRequestIdentifiers.filter {
+            $0.value >= completionCutoff
+        }
         if recentEvents.count > 64 {
             recentEvents.removeFirst(recentEvents.count - 64)
         }
@@ -970,12 +1344,208 @@ final class AuthorizationPromptMonitor: NSObject {
         refresh(forceDiscovery: true)
     }
 
+    private func resetAuthenticationEventCorrelation() {
+        recentEvents.removeAll()
+        requestIdentifiersByPromptKey.removeAll()
+        completedRequestIdentifiers.removeAll()
+    }
+
     private func beginFastDiscoveryBurst() {
         let now = ProcessInfo.processInfo.systemUptime
         fastCoreGraphicsDiscoveryUntil = max(
             fastCoreGraphicsDiscoveryUntil,
             now + 0.75
         )
+    }
+
+    private var isFrontmostApplicationInCurrentProcessTree: Bool {
+        guard let frontmostApplicationProcessID else {
+            return false
+        }
+        return lastProcessSnapshot.candidates.contains { chain in
+            chain.processes.contains {
+                $0.pid == frontmostApplicationProcessID
+            } || chain.descendants.contains {
+                $0.process.pid == frontmostApplicationProcessID
+            }
+        }
+    }
+
+    private var currentSystemRequesterHasExited: Bool {
+        guard let requester = lastProcessSnapshot.candidates.first?
+            .requesterProcess else {
+            return false
+        }
+        return !ProcessIdentityLiveness.isRunning(requester.identity)
+    }
+
+    private func currentSystemRequestHasCompleted(
+        _ window: AuthenticationWindowSnapshot
+    ) -> Bool {
+        let key = AuthenticationPromptSessionKey(window: window)
+        guard let requestIdentifier = requestIdentifiersByPromptKey[key] else {
+            return false
+        }
+        return completedRequestIdentifiers[requestIdentifier] != nil
+    }
+
+    private func endSystemPrompt(
+        _ window: AuthenticationWindowSnapshot,
+        replacementCandidate: AuthenticationWindowSnapshot?,
+        observedCandidates: [AuthenticationWindowSnapshot],
+        now: TimeInterval
+    ) {
+        logger.notice("Authentication request ended")
+        cancelProcessScan()
+        let endedKey = AuthenticationPromptSessionKey(window: window)
+        promptSessions.remove(key: endedKey)
+        coveredSystemPromptKeys.removeAll { $0 == endedKey }
+        if let requestIdentifier = requestIdentifiersByPromptKey.removeValue(
+            forKey: endedKey
+        ) {
+            completedRequestIdentifiers.removeValue(forKey: requestIdentifier)
+            recentEvents.removeAll {
+                $0.requestIdentifier == requestIdentifier
+            }
+        }
+        target = nil
+        targetFirstSeenAt = nil
+        lastProcessSnapshot = .pending
+        isCurrentSystemPromptIgnored = false
+        observationStability.reset()
+        if let replacement = CoveredSystemPromptSelection.replacement(
+            frontmost: replacementCandidate,
+            observed: observedCandidates,
+            coveredKeys: coveredSystemPromptKeys,
+            excluding: endedKey
+        ) {
+            activatePrompt(replacement, at: Date())
+            updatePanel(for: replacement, now: now)
+            return
+        }
+        if restoreInterruptedTerminalPrompt(now: now) {
+            logger.notice("Terminal password prompt restored after authentication request ended")
+            return
+        }
+        panel.hide(promptPresent: false, accessibilityTrusted: true)
+        nextDiscoveryTime = 0
+        report(isShowingPanel: false)
+    }
+
+    private func coverSystemPrompt(_ window: AuthenticationWindowSnapshot) {
+        let key = AuthenticationPromptSessionKey(window: window)
+        coveredSystemPromptKeys.removeAll { $0 == key }
+        coveredSystemPromptKeys.append(key)
+    }
+
+    private func pruneCoveredSystemPrompts(
+        observedPromptKeys: Set<AuthenticationPromptSessionKey>
+    ) {
+        var keysToRemove: [AuthenticationPromptSessionKey] = []
+        for key in coveredSystemPromptKeys {
+            guard let session = promptSessions.sessions[key] else {
+                keysToRemove.append(key)
+                continue
+            }
+            let requestHasCompleted = requestIdentifiersByPromptKey[key].map {
+                completedRequestIdentifiers[$0] != nil
+            } ?? false
+            let requesterIsRunning = session.processSnapshot.candidates.first.map {
+                ProcessIdentityLiveness.isRunning($0.requesterProcess.identity)
+            } ?? true
+            if SystemPromptTeardownPolicy.shouldEnd(
+                requestHasCompleted: requestHasCompleted,
+                requesterIsRunning: requesterIsRunning,
+                promptKey: key,
+                observedPromptKeys: observedPromptKeys
+            ) {
+                keysToRemove.append(key)
+            }
+        }
+        guard !keysToRemove.isEmpty else {
+            return
+        }
+        let removed = Set(keysToRemove)
+        for key in keysToRemove {
+            promptSessions.remove(key: key)
+            if let requestIdentifier = requestIdentifiersByPromptKey.removeValue(
+                forKey: key
+            ) {
+                completedRequestIdentifiers.removeValue(
+                    forKey: requestIdentifier
+                )
+                recentEvents.removeAll {
+                    $0.requestIdentifier == requestIdentifier
+                }
+            }
+        }
+        coveredSystemPromptKeys.removeAll { removed.contains($0) }
+    }
+
+    private func updateActiveNotchScreenIfNeeded(
+        now: TimeInterval,
+        force: Bool
+    ) {
+        let tracksTerminalRequest = panel.isNotchPresented
+            || activePAMPasswordRequest != nil
+            || terminalPromptIdentity != nil
+            || suspendedTerminalPrompt != nil
+        guard force || (tracksTerminalRequest && now >= nextActiveNotchScreenCheckTime) else {
+            return
+        }
+        nextActiveNotchScreenCheckTime = now + 0.10
+        if let visibleFrame = ActiveApplicationScreenLocator.visibleFrame(
+            processID: frontmostApplicationProcessID
+        ) {
+            activeNotchVisibleFrame = visibleFrame
+        }
+    }
+
+    private func suspendTerminalPrompt() {
+        guard let identity = terminalPromptIdentity,
+              lastProcessSnapshot.candidates.contains(where: {
+                  $0.requesterProcess.identity == identity
+              }) else {
+            return
+        }
+        suspendedTerminalPrompt = SuspendedTerminalPrompt(
+            identity: identity,
+            snapshot: lastProcessSnapshot,
+            terminalWindow: terminalPromptWindow,
+            promptSequence: promptSequence
+        )
+    }
+
+    private func restoreInterruptedTerminalPrompt(now: TimeInterval) -> Bool {
+        if let active = activePAMPasswordRequest {
+            guard active.lease.isActive else {
+                finishExpiredPAMPasswordRequest(active)
+                suspendedTerminalPrompt = nil
+                return false
+            }
+            terminalPromptIdentity = active.snapshot.candidates.first?
+                .requesterProcess.identity
+            terminalPromptWindow = active.terminalWindow
+            promptSequence = active.promptSequence
+            lastProcessSnapshot = active.snapshot
+            terminalPromptStability.recordConfirmation()
+            nextTerminalPromptScanTime = 0
+            updatePAMPasswordRequest(active)
+            return panel.isNotchPresented
+        }
+
+        guard let suspended = suspendedTerminalPrompt else {
+            return false
+        }
+        suspendedTerminalPrompt = nil
+        terminalPromptIdentity = suspended.identity
+        terminalPromptWindow = suspended.terminalWindow
+        promptSequence = suspended.promptSequence
+        lastProcessSnapshot = suspended.snapshot
+        terminalPromptStability.recordConfirmation()
+        nextTerminalPromptScanTime = 0
+        updateTerminalPrompt(now: now)
+        return panel.isNotchPresented
     }
 
     private func activatePrompt(
@@ -987,6 +1557,8 @@ final class AuthorizationPromptMonitor: NSObject {
         terminalPromptIdentity = nil
         terminalPromptWindow = nil
         terminalPromptStability.reset()
+        let key = AuthenticationPromptSessionKey(window: window)
+        coveredSystemPromptKeys.removeAll { $0 == key }
         let session = promptSessions.activate(window: window, at: date)
         target = window
         targetFirstSeenAt = session.firstSeenAt
@@ -1007,11 +1579,21 @@ final class AuthorizationPromptMonitor: NSObject {
         at date: Date
     ) {
         cancelProcessScan()
+        let oldKey = AuthenticationPromptSessionKey(window: oldWindow)
+        let newKey = AuthenticationPromptSessionKey(window: newWindow)
         let session = promptSessions.transfer(
             from: oldWindow,
             to: newWindow,
             at: date
         )
+        AuthenticationRequestAssociation.transferMapping(
+            in: &requestIdentifiersByPromptKey,
+            from: oldKey,
+            to: newKey
+        )
+        if let coveredIndex = coveredSystemPromptKeys.firstIndex(of: oldKey) {
+            coveredSystemPromptKeys[coveredIndex] = newKey
+        }
         target = newWindow
         targetFirstSeenAt = session.firstSeenAt
         promptSequence = session.promptSequence
@@ -1050,6 +1632,7 @@ final class AuthorizationPromptMonitor: NSObject {
         cancelTerminalPromptScan()
         terminalPromptIdentity = nil
         terminalPromptWindow = nil
+        suspendedTerminalPrompt = nil
         terminalPromptStability.reset()
         nextTerminalPromptScanTime = 0
         lastProcessSnapshot = .pending
@@ -1063,44 +1646,65 @@ final class AuthorizationPromptMonitor: NSObject {
     }
 
     private func updatePAMPasswordRequest(_ active: ActivePAMPasswordRequest) {
-        guard active.lease.isActive,
-              let chain = active.snapshot.candidates.first else {
+        guard active.lease.isActive else {
+            finishExpiredPAMPasswordRequest(active)
+            resetTerminalPrompt(hidePanel: true, promptPresent: false)
+            return
+        }
+        guard let chain = active.snapshot.candidates.first else {
             abandonActivePAMPasswordRequest()
             resetTerminalPrompt(hidePanel: true, promptPresent: false)
             return
         }
-        var updatedWindow = TerminalPromptWindowLocator.focusedWindow(
-            for: chain,
-            preserving: active.terminalWindow
-        )
-        if updatedWindow == nil, panel.isPAMPasswordEntryFocused {
-            updatedWindow = TerminalPromptWindowLocator.existingWindow(
-                for: active.terminalWindow
-            )
-        }
-        guard let updatedWindow else {
-            if active.offersAppInput {
-                active.useTerminalHandler()
-                panel.dismissVerifiedPAMPasswordRequest(active.request.identifier.uuid)
-                var terminalOnly = active
-                terminalOnly.offersAppInput = false
-                activePAMPasswordRequest = terminalOnly
-            }
+        guard !terminalPromptSuppression.suppressesActivePAMRequest(
+            chain.requesterProcess.identity
+        ) else {
             hideTerminalPromptPanel()
             return
         }
-
+        let updatedWindow = TerminalPromptWindowLocator.retainedWindow(
+            for: chain,
+            preserving: active.terminalWindow
+        )
         var updated = active
         updated.terminalWindow = updatedWindow
         activePAMPasswordRequest = updated
         terminalPromptWindow = updatedWindow
-        panel.showStandalone(
+        presentPAMPasswordRequest(updated)
+    }
+
+    private func presentPAMPasswordRequest(_ active: ActivePAMPasswordRequest) {
+        if active.offersAppInput,
+           !panel.isPresentingVerifiedPAMPasswordRequest {
+            panel.presentVerifiedPAMPasswordRequest(
+                VerifiedPAMPasswordRequest(id: active.request.identifier.uuid),
+                onPassword: { [weak self] requestID, password in
+                    self?.submitPAMPassword(requestID: requestID, password: password)
+                }
+            )
+        }
+        guard let presentationVisibleFrame = notchPresentationVisibleFrame(
+            terminalWindow: active.terminalWindow
+        ) else {
+            hideTerminalPromptPanel()
+            return
+        }
+        panel.showNotch(
             snapshot: active.snapshot,
-            promptSequence: promptSequence,
-            anchorFrame: updatedWindow.frame,
-            visibleFrame: updatedWindow.visibleFrame
+            promptSequence: active.promptSequence,
+            anchorFrame: presentationVisibleFrame,
+            visibleFrame: presentationVisibleFrame,
+            allowsPAMSetupAction: false
         )
         report(isShowingPanel: true)
+    }
+
+    private func notchPresentationVisibleFrame(
+        terminalWindow: TerminalPromptWindowSnapshot?
+    ) -> CGRect? {
+        activeNotchVisibleFrame
+            ?? terminalWindow?.visibleFrame
+            ?? AuthenticationWindowLocator.currentDisplays().first?.visibleFrame
     }
 
     private func submitPAMPassword(requestID: UUID, password: String) {
@@ -1138,6 +1742,19 @@ final class AuthorizationPromptMonitor: NSObject {
         }
         panel.dismissVerifiedPAMPasswordRequest(active.request.identifier.uuid)
         activePAMPasswordRequest = nil
+    }
+
+    private func finishExpiredPAMPasswordRequest(
+        _ active: ActivePAMPasswordRequest
+    ) {
+        if let identity = active.snapshot.candidates.first?
+            .requesterProcess.identity {
+            terminalPromptSuppression.recordPAMCompletion(identity)
+        }
+        panel.dismissVerifiedPAMPasswordRequest(active.request.identifier.uuid)
+        if activePAMPasswordRequest?.request.identifier == active.request.identifier {
+            activePAMPasswordRequest = nil
+        }
     }
 
     private func report(isShowingPanel: Bool) {

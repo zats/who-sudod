@@ -17,6 +17,7 @@ struct ExpectedTree: Codable {
     let inspectionState: String
     let requestKind: String
     let attribution: String
+    let passwordInputVisible: Bool
     let candidateCount: Int
     let rows: [ExpectedPresentationRow]
 }
@@ -38,6 +39,11 @@ enum RequestMode: String {
     case authorizationPassword = "authorization-password"
     case workspaceAdmin = "workspace-admin"
     case terminalPassword = "terminal-password"
+    case terminalPAM = "terminal-pam"
+
+    var usesTerminalPasswordRequest: Bool {
+        self == .terminalPassword || self == .terminalPAM
+    }
 
     var localAuthenticationPolicy: LAPolicy? {
         switch self {
@@ -47,7 +53,7 @@ enum RequestMode: String {
             .deviceOwnerAuthenticationWithBiometrics
         case .localAccessControl, .localRight,
              .authorizationSessionOwner, .authorizationAdmin,
-             .authorizationPassword, .workspaceAdmin, .terminalPassword:
+             .authorizationPassword, .workspaceAdmin, .terminalPassword, .terminalPAM:
             nil
         }
     }
@@ -63,7 +69,7 @@ enum RequestMode: String {
         case .localRight:
             "Verify the Who Sudo'd live process tree with a transient right."
         case .authorizationSessionOwner, .authorizationAdmin,
-             .authorizationPassword, .workspaceAdmin, .terminalPassword:
+             .authorizationPassword, .workspaceAdmin, .terminalPassword, .terminalPAM:
             nil
         }
     }
@@ -71,7 +77,7 @@ enum RequestMode: String {
     var authorizationRight: String? {
         switch self {
         case .localOwner, .localBiometrics, .localAccessControl, .localRight,
-             .workspaceAdmin, .terminalPassword:
+             .workspaceAdmin, .terminalPassword, .terminalPAM:
             nil
         case .authorizationSessionOwner:
             "authenticate-session-owner"
@@ -95,6 +101,8 @@ enum RequestMode: String {
             ("securityAgent", "authorization", "authorizationLog")
         case .terminalPassword:
             ("terminalPassword", "sudo", "heuristicSudo")
+        case .terminalPAM:
+            ("terminalPassword", "sudo", "pamConversation")
         }
     }
 }
@@ -211,7 +219,7 @@ func expectedTree(for requesterPID: pid_t, mode: RequestMode) throws -> Expected
             executableOrCommand: process.executablePath
         )
     }
-    if mode == .terminalPassword {
+    if mode.usesTerminalPasswordRequest {
         rows.append(
             ExpectedPresentationRow(
                 candidateIndex: 0,
@@ -228,6 +236,7 @@ func expectedTree(for requesterPID: pid_t, mode: RequestMode) throws -> Expected
         inspectionState: "complete",
         requestKind: metadata.requestKind,
         attribution: metadata.attribution,
+        passwordInputVisible: mode == .terminalPAM,
         candidateCount: 1,
         rows: rows
     )
@@ -250,9 +259,10 @@ func writeExpectedTree(
 func writeExpectedTerminalPasswordTree(
     requesterPID: pid_t,
     sudoPID: pid_t,
+    mode: RequestMode,
     to path: String
 ) throws {
-    let base = try expectedTree(for: requesterPID, mode: .terminalPassword)
+    let base = try expectedTree(for: requesterPID, mode: mode)
     let sudoDepth = base.rows.count - 1
     var rows = Array(base.rows.dropLast())
     rows.append(
@@ -278,6 +288,7 @@ func writeExpectedTerminalPasswordTree(
         inspectionState: base.inspectionState,
         requestKind: base.requestKind,
         attribution: base.attribution,
+        passwordInputVisible: base.passwordInputVisible,
         candidateCount: base.candidateCount,
         rows: rows
     )
@@ -386,6 +397,7 @@ final class TerminalPasswordRequestSupervisor: NSObject {
 
 @MainActor
 func runTerminalPasswordRequest(
+    mode: RequestMode,
     expectedPath: String,
     timeout: TimeInterval
 ) -> Never {
@@ -460,6 +472,7 @@ func runTerminalPasswordRequest(
         try writeExpectedTerminalPasswordTree(
             requesterPID: getpid(),
             sudoPID: childProcessID,
+            mode: mode,
             to: expectedPath
         )
     } catch {
@@ -467,7 +480,7 @@ func runTerminalPasswordRequest(
         fail("Could not write the expected process tree: \(error.localizedDescription)", status: 74)
     }
 
-    print("mode=terminal-password requesterPID=\(getpid()) sudoPID=\(childProcessID)")
+    print("mode=\(mode.rawValue) requesterPID=\(getpid()) sudoPID=\(childProcessID)")
     fflush(stdout)
     TerminalPasswordRequestSupervisor(
         application: application,
@@ -562,7 +575,7 @@ guard arguments.count == 3,
       let timeout = TimeInterval(arguments[2]),
       timeout > 0 else {
     fail(
-        "Usage: WhoSudodLiveRequester <local-owner|local-biometrics|local-access-control|local-right|authorization-session-owner|authorization-admin|authorization-password|workspace-admin|terminal-password> EXPECTED_JSON TIMEOUT_SECONDS",
+        "Usage: WhoSudodLiveRequester <local-owner|local-biometrics|local-access-control|local-right|authorization-session-owner|authorization-admin|authorization-password|workspace-admin|terminal-password|terminal-pam> EXPECTED_JSON TIMEOUT_SECONDS",
         status: 64
     )
 }
@@ -583,7 +596,7 @@ if let policy = mode.localAuthenticationPolicy {
     context = nil
 }
 
-if mode != .terminalPassword {
+if !mode.usesTerminalPasswordRequest {
     do {
         try writeExpectedTree(
             for: getpid(),
@@ -598,8 +611,9 @@ if mode != .terminalPassword {
 print("mode=\(mode.rawValue) requesterPID=\(getpid())")
 fflush(stdout)
 
-if mode == .terminalPassword {
+if mode.usesTerminalPasswordRequest {
     runTerminalPasswordRequest(
+        mode: mode,
         expectedPath: arguments[1],
         timeout: timeout
     )

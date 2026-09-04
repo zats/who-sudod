@@ -1,6 +1,40 @@
 import Foundation
 import Observation
 
+@MainActor
+@Observable
+final class AccessibilityPermissionController {
+    private(set) var isGranted: Bool
+
+    @ObservationIgnored private let isTrusted: () -> Bool
+    @ObservationIgnored private let requestHandler: () -> Void
+
+    init(
+        isTrusted: @escaping () -> Bool,
+        requestHandler: @escaping () -> Void
+    ) {
+        self.isTrusted = isTrusted
+        self.requestHandler = requestHandler
+        isGranted = isTrusted()
+    }
+
+    func refresh() {
+        isGranted = isTrusted()
+    }
+
+    func update(isGranted: Bool) {
+        self.isGranted = isGranted
+    }
+
+    func requestAccess() {
+        refresh()
+        guard !isGranted else {
+            return
+        }
+        requestHandler()
+    }
+}
+
 enum SettingsPane: String, CaseIterable, Identifiable {
     case general
     case ignoredApps
@@ -80,6 +114,13 @@ struct PAMSettingsPresentation: Equatable {
     let actionTitle: String
     let isWarning: Bool
     let isLoading: Bool
+
+    var notchAction: PAMNotchAction? {
+        guard let action, action == .install || action == .repair else {
+            return nil
+        }
+        return PAMNotchAction(action: action, title: actionTitle)
+    }
 
     init(
         snapshot: PAMIntegrationSnapshot,
@@ -182,6 +223,11 @@ struct PAMSettingsPresentation: Equatable {
     }
 }
 
+struct PAMNotchAction: Equatable {
+    let action: PAMSettingsAction
+    let title: String
+}
+
 @MainActor
 @Observable
 final class SettingsModel {
@@ -249,6 +295,13 @@ final class SettingsModel {
 
     func requestPAMAction() {
         guard let action = pamPresentation.action else {
+            return
+        }
+        requestPAMAction(action)
+    }
+
+    func requestPAMAction(_ action: PAMSettingsAction) {
+        guard pamPresentation.action == action else {
             return
         }
         pendingPAMAction = action

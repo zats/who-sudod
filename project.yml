@@ -8,6 +8,9 @@ options:
   xcodeVersion: "27.0"
 
 packages:
+  DynamicNotchKit:
+    url: https://github.com/zats/DynamicNotchKit.git
+    revision: f592c79f0da7bf0b855af1203df9bda7de33c37e
   Permiso:
     url: https://github.com/zats/permiso.git
     revision: 713c8b70c650947dd349754f3720287a7c2320d0
@@ -31,6 +34,8 @@ targets:
     productName: "Who Sudo'd"
     sources:
       - path: WhoSudod
+      - path: ThirdPartyNotices/DynamicNotchKit-LICENSE.txt
+        buildPhase: resources
       - path: WhoSudodPAMInstaller/com.zats.WhoSudo.PAMInstaller.plist
         buildPhase:
           copyFiles:
@@ -48,6 +53,7 @@ targets:
         INFOPLIST_KEY_NSSystemAdministrationUsageDescription: "Who Sudo'd installs or removes its optional sudo password input."
         GENERATE_INFOPLIST_FILE: YES
     dependencies:
+      - package: DynamicNotchKit
       - package: Permiso
       - target: WhoSudodPAMInstaller
         embed: true

@@ -4,13 +4,13 @@ set -euo pipefail
 umask 077
 
 if (( $# != 1 )); then
-    print -u2 "Usage: ${0:t} <local-owner|local-biometrics|local-access-control|local-right|authorization-session-owner|authorization-admin|authorization-password|workspace-admin|terminal-password>"
+    print -u2 "Usage: ${0:t} <local-owner|local-biometrics|local-access-control|local-right|authorization-session-owner|authorization-admin|authorization-password|workspace-admin|terminal-password|terminal-pam>"
     exit 64
 fi
 
 request_mode="$1"
 case "${request_mode}" in
-    local-owner|local-biometrics|local-access-control|local-right|authorization-session-owner|authorization-admin|authorization-password|workspace-admin|terminal-password)
+    local-owner|local-biometrics|local-access-control|local-right|authorization-session-owner|authorization-admin|authorization-password|workspace-admin|terminal-password|terminal-pam)
         ;;
     *)
         print -u2 "Unsupported authentication mode: ${request_mode}"
@@ -193,7 +193,7 @@ app_process_id="$!"
 "${waiter}" ready "${state_path}" "${run_identifier}" "${app_process_id}" 5
 baseline_sequence="$(/usr/bin/plutil -extract promptSequence raw "${state_path}")"
 
-if [[ "${request_mode}" == terminal-password ]]; then
+if [[ "${request_mode}" == terminal-password || "${request_mode}" == terminal-pam ]]; then
     requester_timeout=35
     tree_timeout=30
 fi

@@ -4,6 +4,48 @@ import XCTest
 
 @MainActor
 final class SettingsModelTests: XCTestCase {
+    func testAccessibilityPermissionRefreshesFromSystemState() {
+        var isTrusted = false
+        let controller = AccessibilityPermissionController(
+            isTrusted: { isTrusted },
+            requestHandler: {}
+        )
+
+        XCTAssertFalse(controller.isGranted)
+        isTrusted = true
+        controller.refresh()
+
+        XCTAssertTrue(controller.isGranted)
+    }
+
+    func testAccessibilityPermissionRequestsAccessOnlyWhenMissing() {
+        var isTrusted = false
+        var requestCount = 0
+        let controller = AccessibilityPermissionController(
+            isTrusted: { isTrusted },
+            requestHandler: { requestCount += 1 }
+        )
+
+        controller.requestAccess()
+        XCTAssertEqual(requestCount, 1)
+
+        isTrusted = true
+        controller.requestAccess()
+        XCTAssertEqual(requestCount, 1)
+        XCTAssertTrue(controller.isGranted)
+    }
+
+    func testAccessibilityPermissionAcceptsMonitorUpdates() {
+        let controller = AccessibilityPermissionController(
+            isTrusted: { false },
+            requestHandler: {}
+        )
+
+        controller.update(isGranted: true)
+
+        XCTAssertTrue(controller.isGranted)
+    }
+
     func testPaneSelectionDefaultsToGeneralAndPersists() {
         let defaults = isolatedUserDefaults()
         let firstValues = dependencies()
@@ -93,6 +135,31 @@ final class SettingsModelTests: XCTestCase {
         XCTAssertEqual(value.action, .repair)
         XCTAssertEqual(value.actionTitle, "Repair…")
         XCTAssertTrue(value.isWarning)
+    }
+
+    func testNotchActionIncludesOnlyInstallAndRepair() {
+        XCTAssertEqual(
+            presentation(state: .notInstalled).notchAction,
+            PAMNotchAction(action: .install, title: "Install…")
+        )
+        XCTAssertEqual(
+            presentation(state: .needsRepair).notchAction,
+            PAMNotchAction(action: .repair, title: "Repair…")
+        )
+
+        for state in [
+            PAMIntegrationStateCode.installed,
+            .removalOnly,
+            .unsupported,
+        ] {
+            XCTAssertNil(presentation(state: state).notchAction)
+        }
+        XCTAssertNil(
+            presentation(
+                state: .notInstalled,
+                helper: .unavailable
+            ).notchAction
+        )
     }
 
     func testUnsupportedPresentationHasNoAction() {
@@ -190,6 +257,52 @@ final class SettingsModelTests: XCTestCase {
 
         XCTAssertNil(model.pendingPAMAction)
         XCTAssertFalse(model.isPAMConfirmationPresented)
+    }
+
+    func testExplicitPAMActionRequestAcceptsCurrentAction() {
+        let values = dependencies()
+        let model = SettingsModel(
+            pamIntegration: values.controller,
+            pamConversationError: nil,
+            userDefaults: isolatedUserDefaults()
+        )
+
+        model.requestPAMAction(.install)
+
+        XCTAssertEqual(model.pendingPAMAction, .install)
+        XCTAssertTrue(model.isPAMConfirmationPresented)
+    }
+
+    func testExplicitPAMActionRequestRejectsMismatchedAction() {
+        let values = dependencies()
+        let model = SettingsModel(
+            pamIntegration: values.controller,
+            pamConversationError: nil,
+            userDefaults: isolatedUserDefaults()
+        )
+
+        model.requestPAMAction(.repair)
+
+        XCTAssertNil(model.pendingPAMAction)
+        XCTAssertFalse(model.isPAMConfirmationPresented)
+    }
+
+    func testExplicitPAMActionRequestRejectsStaleAction() throws {
+        let values = dependencies()
+        let model = SettingsModel(
+            pamIntegration: values.controller,
+            pamConversationError: nil,
+            userDefaults: isolatedUserDefaults()
+        )
+        let staleAction = try XCTUnwrap(model.pamPresentation.notchAction?.action)
+        values.helper.statusResponse = PAMTestHelperResponse(.installed)
+        values.controller.refresh()
+
+        model.requestPAMAction(staleAction)
+
+        XCTAssertNil(model.pendingPAMAction)
+        XCTAssertFalse(model.isPAMConfirmationPresented)
+        XCTAssertEqual(model.pamPresentation.action, .uninstall)
     }
 
     func testConfirmInstallRunsAuthorizationAndHelperInstall() {

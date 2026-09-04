@@ -99,6 +99,79 @@ final class WindowObservationStabilityTests: XCTestCase {
         )
     }
 
+    func testInactiveMissingAuthenticationWindowIsRetained() {
+        XCTAssertEqual(
+            AuthenticationWindowAbsenceResolution.resolve(
+                presenterIsRunning: true,
+                presenterIsActive: false,
+                requesterIsFrontmost: false
+            ),
+            .retain
+        )
+    }
+
+    func testActiveMissingAuthenticationWindowCountsAsAConfirmedMiss() {
+        XCTAssertEqual(
+            AuthenticationWindowAbsenceResolution.resolve(
+                presenterIsRunning: true,
+                presenterIsActive: true,
+                requesterIsFrontmost: false
+            ),
+            .countMiss
+        )
+    }
+
+    func testMissingAuthenticationWindowCountsWhenRequesterReturnsToFront() {
+        XCTAssertEqual(
+            AuthenticationWindowAbsenceResolution.resolve(
+                presenterIsRunning: true,
+                presenterIsActive: false,
+                requesterIsFrontmost: true
+            ),
+            .countMiss
+        )
+    }
+
+    func testExitedAuthenticationPresenterEndsImmediately() {
+        XCTAssertEqual(
+            AuthenticationWindowAbsenceResolution.resolve(
+                presenterIsRunning: false,
+                presenterIsActive: false,
+                requesterIsFrontmost: false
+            ),
+            .endImmediately
+        )
+    }
+
+    func testObservedSystemPromptOutlivesRequester() {
+        XCTAssertFalse(
+            SystemPromptTeardownPolicy.shouldEnd(
+                requestHasCompleted: false,
+                requesterIsRunning: false,
+                promptIsObserved: true
+            )
+        )
+    }
+
+    func testProcessIdentityLivenessRejectsPIDReuse() throws {
+        let current = try XCTUnwrap(
+            ProcessIdentityLiveness.currentIdentity(processID: getpid())
+        )
+
+        XCTAssertTrue(ProcessIdentityLiveness.isRunning(current))
+        XCTAssertFalse(
+            ProcessIdentityLiveness.isRunning(
+                ProcessIdentity(
+                    pid: current.pid,
+                    startTime: ProcessStartTime(
+                        seconds: current.startTime.seconds + 1,
+                        microseconds: current.startTime.microseconds
+                    )
+                )
+            )
+        )
+    }
+
     func testTerminalPromptKeepsObservedCurrentRequest() {
         XCTAssertEqual(
             TerminalPromptObservationResolution.resolve(
@@ -111,6 +184,117 @@ final class WindowObservationStabilityTests: XCTestCase {
         )
     }
 
+    func testTerminalPromptFocusLossDoesNotEndObservedRequest() {
+        XCTAssertEqual(
+            TerminalPromptObservationResolution.resolve(
+                current: first,
+                observed: [first],
+                active: [],
+                currentMissConfirmed: false
+            ),
+            .keepCurrent
+        )
+    }
+
+    func testDismissedTerminalPromptSurvivesRepeatedEmptyObservationsWhileProcessLives() {
+        var suppression = TerminalPromptSuppressionState()
+        suppression.recordUserDismissal(first)
+
+        for _ in 0..<3 {
+            suppression.refresh(
+                observed: [],
+                isRunning: { $0 == self.first }
+            )
+        }
+
+        XCTAssertTrue(suppression.suppressesHeuristicPrompt(first))
+    }
+
+    func testDismissedTerminalPromptIsPrunedAfterExactProcessExits() {
+        var suppression = TerminalPromptSuppressionState()
+        suppression.recordUserDismissal(first)
+        suppression.recordPAMCompletion(second)
+
+        suppression.refresh(
+            observed: [],
+            isRunning: { $0 == self.second }
+        )
+
+        XCTAssertFalse(suppression.suppressesHeuristicPrompt(first))
+        XCTAssertTrue(suppression.suppressesHeuristicPrompt(second))
+    }
+
+    func testDismissedTerminalPromptSurvivesOneStaleObservationAfterExit() {
+        var suppression = TerminalPromptSuppressionState()
+        suppression.recordPAMCompletion(first)
+
+        suppression.refresh(
+            observed: [first],
+            isRunning: { _ in false }
+        )
+        XCTAssertTrue(suppression.suppressesHeuristicPrompt(first))
+
+        suppression.refresh(observed: [], isRunning: { _ in false })
+        XCTAssertFalse(suppression.suppressesHeuristicPrompt(first))
+    }
+
+    func testCompletedPAMRequestSuppressesHeuristicButAllowsSameProcessRetry() {
+        var suppression = TerminalPromptSuppressionState()
+        suppression.recordPAMCompletion(first)
+
+        XCTAssertTrue(suppression.suppressesHeuristicPrompt(first))
+        XCTAssertTrue(suppression.beginVerifiedPAMRequest(first))
+        XCTAssertFalse(suppression.suppressesHeuristicPrompt(first))
+    }
+
+    func testNewPAMConversationSupersedesSameRunningSudoBeforeOldEnd() throws {
+        let firstRequest = PAMPasswordRequest(
+            identifier: try XCTUnwrap(
+                PAMRequestIdentifier(bytes: Data(repeating: 0x11, count: 16))
+            ),
+            processID: first.pid,
+            realUserID: 501,
+            username: "test",
+            terminal: "/dev/ttys001",
+            prompt: "Password:"
+        )
+        let retryRequest = PAMPasswordRequest(
+            identifier: try XCTUnwrap(
+                PAMRequestIdentifier(bytes: Data(repeating: 0x22, count: 16))
+            ),
+            processID: first.pid,
+            realUserID: 501,
+            username: "test",
+            terminal: "/dev/ttys001",
+            prompt: "Password:"
+        )
+
+        XCTAssertTrue(
+            PAMRequestReplacementPolicy.canSupersede(
+                activeRequest: firstRequest,
+                activeIdentity: first,
+                incomingRequest: retryRequest,
+                currentIdentity: first
+            )
+        )
+        XCTAssertFalse(
+            PAMRequestReplacementPolicy.canSupersede(
+                activeRequest: firstRequest,
+                activeIdentity: first,
+                incomingRequest: retryRequest,
+                currentIdentity: second
+            )
+        )
+    }
+
+    func testExplicitlyDismissedPAMRequestRejectsSameProcessRetry() {
+        var suppression = TerminalPromptSuppressionState()
+        suppression.recordUserDismissal(first)
+
+        XCTAssertFalse(suppression.beginVerifiedPAMRequest(first))
+        XCTAssertTrue(suppression.suppressesActivePAMRequest(first))
+    }
+
     func testTerminalPromptHandsOffOnlyToASeparatelyActiveRequest() {
         XCTAssertEqual(
             TerminalPromptObservationResolution.resolve(
@@ -121,6 +305,18 @@ final class WindowObservationStabilityTests: XCTestCase {
             ),
             .select(second)
         )
+        XCTAssertEqual(
+            TerminalPromptObservationResolution.resolve(
+                current: first,
+                observed: [second, first],
+                active: [],
+                currentMissConfirmed: false
+            ),
+            .keepCurrent
+        )
+    }
+
+    func testTwoObservedTerminalPromptsDoNotSwitchWithoutAFocusedWindow() {
         XCTAssertEqual(
             TerminalPromptObservationResolution.resolve(
                 current: first,
@@ -153,7 +349,46 @@ final class WindowObservationStabilityTests: XCTestCase {
         )
     }
 
-    func testTerminalPromptStartsAndEndsOnlyWithAnActiveSelection() {
+    func testTerminalPromptEndRequiresThreeConsecutiveMissingScans() {
+        var stability = WindowObservationStability(requiredMisses: 3)
+
+        for _ in 0..<2 {
+            XCTAssertEqual(
+                TerminalPromptObservationResolution.resolve(
+                    current: first,
+                    observed: [],
+                    active: [],
+                    currentMissConfirmed: stability.recordMiss()
+                ),
+                .waitForCurrent
+            )
+        }
+
+        stability.recordConfirmation()
+        XCTAssertEqual(
+            TerminalPromptObservationResolution.resolve(
+                current: first,
+                observed: [first],
+                active: [first],
+                currentMissConfirmed: false
+            ),
+            .keepCurrent
+        )
+
+        XCTAssertFalse(stability.recordMiss())
+        XCTAssertFalse(stability.recordMiss())
+        XCTAssertEqual(
+            TerminalPromptObservationResolution.resolve(
+                current: first,
+                observed: [],
+                active: [],
+                currentMissConfirmed: stability.recordMiss()
+            ),
+            .endCurrent
+        )
+    }
+
+    func testTerminalPromptStartsFromVerifiedProcessEvidenceWithoutAWindow() {
         XCTAssertEqual(
             TerminalPromptObservationResolution.resolve(
                 current: nil,
@@ -161,7 +396,7 @@ final class WindowObservationStabilityTests: XCTestCase {
                 active: [],
                 currentMissConfirmed: false
             ),
-            .noSelection
+            .select(first)
         )
         XCTAssertEqual(
             TerminalPromptObservationResolution.resolve(
@@ -184,8 +419,85 @@ final class WindowObservationStabilityTests: XCTestCase {
     }
 }
 
+final class CoveredSystemPromptSelectionTests: XCTestCase {
+    func testObservedCoveredPromptOutlivesRequester() {
+        let covered = window(id: 44)
+        let coveredKey = AuthenticationPromptSessionKey(window: covered)
+
+        XCTAssertFalse(
+            SystemPromptTeardownPolicy.shouldEnd(
+                requestHasCompleted: false,
+                requesterIsRunning: false,
+                promptKey: coveredKey,
+                observedPromptKeys: [coveredKey]
+            )
+        )
+    }
+
+    func testPrefersFrontmostPromptThatDidNotEnd() {
+        let ended = window(id: 44)
+        let frontmost = window(id: 45)
+
+        XCTAssertEqual(
+            CoveredSystemPromptSelection.replacement(
+                frontmost: frontmost,
+                observed: [frontmost],
+                coveredKeys: [],
+                excluding: AuthenticationPromptSessionKey(window: ended)
+            ),
+            frontmost
+        )
+    }
+
+    func testRestoresNewestCoveredPromptThatIsStillObserved() {
+        let oldest = window(id: 44)
+        let newest = window(id: 45)
+        let ended = window(id: 46)
+
+        XCTAssertEqual(
+            CoveredSystemPromptSelection.replacement(
+                frontmost: nil,
+                observed: [oldest, newest],
+                coveredKeys: [
+                    AuthenticationPromptSessionKey(window: oldest),
+                    AuthenticationPromptSessionKey(window: newest)
+                ],
+                excluding: AuthenticationPromptSessionKey(window: ended)
+            ),
+            newest
+        )
+    }
+
+    func testDoesNotRestoreUnobservedOrEndingPrompt() {
+        let covered = window(id: 44)
+        let ended = window(id: 45)
+        let unrelated = window(id: 46)
+
+        XCTAssertNil(
+            CoveredSystemPromptSelection.replacement(
+                frontmost: ended,
+                observed: [ended, unrelated],
+                coveredKeys: [AuthenticationPromptSessionKey(window: covered)],
+                excluding: AuthenticationPromptSessionKey(window: ended)
+            )
+        )
+    }
+
+    private func window(id: CGWindowID) -> AuthenticationWindowSnapshot {
+        let frame = CGRect(x: 100, y: 200, width: 260, height: 289)
+        return AuthenticationWindowSnapshot(
+            identity: .coreGraphics(id),
+            processID: pid_t(id),
+            surfaceKind: .localAuthentication,
+            coreGraphicsFrame: frame,
+            frame: frame,
+            visibleFrame: CGRect(x: 0, y: 24, width: 1920, height: 1056)
+        )
+    }
+}
+
 final class AuthenticationWindowRecoveryTests: XCTestCase {
-    func testRecoversSamePromptWhenCoreGraphicsRepresentationChangesToAccessibility() throws {
+    func testDoesNotRecoverUnprovenCoreGraphicsIdentityAsAccessibilityPrompt() throws {
         let frame = CGRect(x: 100, y: 200, width: 260, height: 289)
         let coreGraphics = authenticationWindow(
             identity: .coreGraphics(44),
@@ -193,17 +505,16 @@ final class AuthenticationWindowRecoveryTests: XCTestCase {
             frame: frame
         )
         let accessibility = authenticationWindow(
-            identity: .accessibility(processID: 321),
+            identity: .accessibility(processID: 321, elementIdentifier: 17),
             processID: 321,
             frame: frame.offsetBy(dx: 2, dy: -1)
         )
 
-        XCTAssertEqual(
+        XCTAssertNil(
             AuthenticationWindowRecovery.continuousReplacement(
                 for: coreGraphics,
                 candidate: accessibility
-            ),
-            accessibility
+            )
         )
     }
 
@@ -215,7 +526,7 @@ final class AuthenticationWindowRecoveryTests: XCTestCase {
             frame: frame
         )
         let otherProcess = authenticationWindow(
-            identity: .accessibility(processID: 654),
+            identity: .accessibility(processID: 654, elementIdentifier: 17),
             processID: 654,
             frame: frame
         )
@@ -284,7 +595,7 @@ final class AuthenticationWindowRecoveryTests: XCTestCase {
         )
     }
 
-    func testSamePromptFocusTransitionKeepsCurrentPanelVisible() {
+    func testCrossSourceFocusTransitionDoesNotTransferUnprovenHistory() {
         let frame = CGRect(x: 100, y: 200, width: 260, height: 289)
         let coreGraphics = authenticationWindow(
             identity: .coreGraphics(44),
@@ -292,7 +603,7 @@ final class AuthenticationWindowRecoveryTests: XCTestCase {
             frame: frame
         )
         let accessibility = authenticationWindow(
-            identity: .accessibility(processID: 321),
+            identity: .accessibility(processID: 321, elementIdentifier: 17),
             processID: 321,
             frame: frame.offsetBy(dx: 1, dy: -1)
         )
@@ -302,11 +613,10 @@ final class AuthenticationWindowRecoveryTests: XCTestCase {
             to: accessibility
         )
 
-        XCTAssertEqual(transition, .samePrompt(accessibility))
-        XCTAssertFalse(transition.hidesCurrentPanel)
+        XCTAssertEqual(transition, .differentPrompt(accessibility))
     }
 
-    func testSameIdentityFocusTransitionKeepsCurrentPanelVisible() {
+    func testSameIdentityFocusTransitionKeepsCurrentPromptSelected() {
         let frame = CGRect(x: 100, y: 200, width: 260, height: 289)
         let current = authenticationWindow(
             identity: .coreGraphics(44),
@@ -325,10 +635,62 @@ final class AuthenticationWindowRecoveryTests: XCTestCase {
         )
 
         XCTAssertEqual(transition, .samePrompt(freshCandidate))
-        XCTAssertFalse(transition.hidesCurrentPanel)
     }
 
-    func testDifferentPromptHandsOffWithoutHidingButMissingPromptHides() {
+    func testDifferentAccessibilityWindowInSamePresenterSwitchesPrompt() {
+        let frame = CGRect(x: 100, y: 200, width: 260, height: 289)
+        let current = authenticationWindow(
+            identity: .accessibility(
+                processID: 321,
+                elementIdentifier: 17
+            ),
+            processID: 321,
+            frame: frame
+        )
+        let topmost = authenticationWindow(
+            identity: .accessibility(
+                processID: 321,
+                elementIdentifier: 18
+            ),
+            processID: 321,
+            frame: frame
+        )
+
+        XCTAssertEqual(
+            AuthenticationWindowFocusTransition.resolve(
+                from: current,
+                to: topmost
+            ),
+            .differentPrompt(topmost)
+        )
+    }
+
+    func testFocusedCGWindowDoesNotMergeWithPreviousAccessibilityWindow() {
+        let frame = CGRect(x: 100, y: 200, width: 260, height: 289)
+        let previous = authenticationWindow(
+            identity: .accessibility(
+                processID: 321,
+                elementIdentifier: 17
+            ),
+            processID: 321,
+            frame: frame
+        )
+        let topmostCoreGraphics = authenticationWindow(
+            identity: .coreGraphics(44),
+            processID: 321,
+            frame: frame
+        )
+
+        XCTAssertEqual(
+            AuthenticationWindowFocusTransition.resolve(
+                from: previous,
+                to: topmostCoreGraphics
+            ),
+            .differentPrompt(topmostCoreGraphics)
+        )
+    }
+
+    func testDifferentFocusedPromptHandsOffButNoFocusedCandidateKeepsCurrentPrompt() {
         let frame = CGRect(x: 100, y: 200, width: 260, height: 289)
         let current = authenticationWindow(
             identity: .coreGraphics(44),
@@ -336,22 +698,24 @@ final class AuthenticationWindowRecoveryTests: XCTestCase {
             frame: frame
         )
         let different = authenticationWindow(
-            identity: .accessibility(processID: 654),
+            identity: .accessibility(processID: 654, elementIdentifier: 17),
             processID: 654,
             frame: frame
         )
 
-        XCTAssertFalse(
+        XCTAssertEqual(
             AuthenticationWindowFocusTransition.resolve(
                 from: current,
                 to: different
-            ).hidesCurrentPanel
+            ),
+            .differentPrompt(different)
         )
-        XCTAssertTrue(
+        XCTAssertEqual(
             AuthenticationWindowFocusTransition.resolve(
                 from: current,
                 to: nil
-            ).hidesCurrentPanel
+            ),
+            .noCandidate
         )
     }
 

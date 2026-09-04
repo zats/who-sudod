@@ -61,6 +61,7 @@ final class PAMIntegrationController {
     private(set) var snapshot: PAMIntegrationSnapshot {
         didSet { didChange?(snapshot) }
     }
+    private(set) var hasCompletedRefresh = false
     var didChange: ((PAMIntegrationSnapshot) -> Void)?
 
     init(
@@ -122,6 +123,7 @@ final class PAMIntegrationController {
                 for: integration,
                 helperState: helperState
             )
+            hasCompletedRefresh = true
             snapshot = PAMIntegrationSnapshot(
                 integration: integration,
                 helper: helperState,
@@ -145,6 +147,7 @@ final class PAMIntegrationController {
                           !operationIsInFlight else {
                         return
                     }
+                    hasCompletedRefresh = true
                     acceptRemoteState(code: code, detail: detail)
                 }
             case .failure(let error):
@@ -153,6 +156,7 @@ final class PAMIntegrationController {
                     for: integration,
                     helperState: service.state
                 )
+                hasCompletedRefresh = true
                 snapshot = PAMIntegrationSnapshot(
                     integration: integration,
                     helper: service.state,

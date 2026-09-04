@@ -298,6 +298,13 @@ private enum PAMControllerTestError: LocalizedError {
 
 @MainActor
 final class PAMIntegrationControllerTests: XCTestCase {
+    func testConstructorSnapshotIsNotATrustedRefreshResult() {
+        let values = dependencies(serviceState: .notRegistered)
+
+        XCTAssertFalse(values.controller.hasCompletedRefresh)
+        XCTAssertEqual(values.controller.snapshot.integration.state, .notInstalled)
+    }
+
     func testExactHelperRequirementIncludesCodeDirectoryHash() throws {
         let identity = PAMHelperBuildIdentity(
             applicationCodeDirectoryHash: Data(repeating: 0xAA, count: 20),
@@ -318,6 +325,7 @@ final class PAMIntegrationControllerTests: XCTestCase {
 
         values.controller.install()
 
+        XCTAssertFalse(values.controller.hasCompletedRefresh)
         XCTAssertEqual(
             values.recorder.calls,
             [
@@ -837,6 +845,7 @@ final class PAMIntegrationControllerTests: XCTestCase {
 
         values.controller.refresh()
 
+        XCTAssertTrue(values.controller.hasCompletedRefresh)
         XCTAssertEqual(values.recorder.calls, [.preflight, .status])
         XCTAssertEqual(
             values.controller.snapshot.integration,
@@ -852,11 +861,13 @@ final class PAMIntegrationControllerTests: XCTestCase {
 
         values.controller.refresh()
 
+        XCTAssertFalse(values.controller.hasCompletedRefresh)
         XCTAssertEqual(values.recorder.calls, [.preflight, .status])
         XCTAssertEqual(values.controller.snapshot.integration.state, .notInstalled)
 
         values.helper.completeStatus(with: PAMTestHelperResponse(.installed))
 
+        XCTAssertTrue(values.controller.hasCompletedRefresh)
         XCTAssertEqual(values.controller.snapshot.integration.state, .installed)
     }
 
@@ -870,6 +881,7 @@ final class PAMIntegrationControllerTests: XCTestCase {
             with: PAMTestHelperResponse(.needsRepair, detail: "Stale state.")
         )
 
+        XCTAssertFalse(values.controller.hasCompletedRefresh)
         XCTAssertEqual(
             values.recorder.calls,
             [
@@ -887,12 +899,35 @@ final class PAMIntegrationControllerTests: XCTestCase {
 
     func testRefreshDoesNotCallUnavailableHelper() {
         let values = dependencies(serviceState: .unavailable)
+        var observerSawCompletedRefresh = false
+        values.controller.didChange = { _ in
+            observerSawCompletedRefresh = values.controller.hasCompletedRefresh
+        }
 
         values.controller.refresh()
 
+        XCTAssertTrue(values.controller.hasCompletedRefresh)
+        XCTAssertTrue(observerSawCompletedRefresh)
         XCTAssertTrue(values.recorder.calls.isEmpty)
         XCTAssertEqual(values.controller.snapshot.helper, .unavailable)
         XCTAssertNil(values.controller.snapshot.operationError)
+    }
+
+    func testAcceptedPreflightFailureCompletesRefreshWithLocalState() {
+        let values = dependencies(serviceState: .enabled, localState: .needsRepair)
+        values.helper.preflightResults = [
+            .failure(.serviceUnavailable("The helper connection failed."))
+        ]
+
+        values.controller.refresh()
+
+        XCTAssertTrue(values.controller.hasCompletedRefresh)
+        XCTAssertEqual(values.recorder.calls, [.preflight])
+        XCTAssertEqual(values.controller.snapshot.integration.state, .needsRepair)
+        XCTAssertEqual(
+            values.controller.snapshot.operationError,
+            "The helper connection failed."
+        )
     }
 
     func testUnsupportedHelperReplyUsesItsDetailAsTheOperationError() {

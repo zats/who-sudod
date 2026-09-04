@@ -4,6 +4,21 @@ import XCTest
 @testable import WhoSudod
 
 final class AuthenticationEvidenceSelectionTests: XCTestCase {
+    func testNewBeginClearsOrphanedCompletionForReusedIdentifier() {
+        let identifier = AuthenticationRequestIdentifier.authorization(
+            authdProcessID: 100,
+            engineID: 1
+        )
+        var completions = [identifier: Date(timeIntervalSince1970: 100)]
+
+        AuthenticationCompletionHistory.recordBegin(
+            identifier,
+            in: &completions
+        )
+
+        XCTAssertNil(completions[identifier])
+    }
+
     func testSecurityAgentPrefersAuthorizationEvidence() throws {
         let firstSeenAt = Date(timeIntervalSince1970: 100)
         let localAuthentication = event(
@@ -222,6 +237,209 @@ final class AuthenticationEvidenceSelectionTests: XCTestCase {
             executablePath: source == .localAuthentication ? "/tmp/Client" : nil,
             receivedAt: date,
             source: source
+        )
+    }
+}
+
+final class AuthenticationRequestAssociationTests: XCTestCase {
+    func testSelectsOnlyUnassignedActiveIdentifierForRequester() throws {
+        let promptKey = self.promptKey(id: 10)
+        let identifier = self.identifier(clientID: 1)
+
+        let selected = AuthenticationRequestAssociation.unassignedActiveIdentifier(
+            requesterProcessID: 200,
+            evidence: [event(pid: 200, identifier: identifier)],
+            completedIdentifiers: [],
+            existingMappings: [:],
+            promptKey: promptKey
+        )
+
+        XCTAssertEqual(try XCTUnwrap(selected), identifier)
+    }
+
+    func testRejectsIdentifierThatCompletedWhileScanWasRunning() {
+        let promptKey = self.promptKey(id: 10)
+        let identifier = self.identifier(clientID: 1)
+
+        XCTAssertNil(
+            AuthenticationRequestAssociation.unassignedActiveIdentifier(
+                requesterProcessID: 200,
+                evidence: [event(pid: 200, identifier: identifier)],
+                completedIdentifiers: [identifier],
+                existingMappings: [:],
+                promptKey: promptKey
+            )
+        )
+    }
+
+    func testAssociatesOnlyCompletedIdentifierWhenScanFinishesAfterRequest() throws {
+        let promptKey = self.promptKey(id: 10)
+        let identifier = self.identifier(clientID: 1)
+
+        let selected = AuthenticationRequestAssociation.unassignedCompletedIdentifier(
+            requesterProcessID: 200,
+            evidence: [event(pid: 200, identifier: identifier)],
+            currentEvidence: [],
+            completedIdentifiers: [identifier],
+            existingMappings: [:],
+            promptKey: promptKey
+        )
+
+        XCTAssertEqual(try XCTUnwrap(selected), identifier)
+    }
+
+    func testDoesNotAssociateCompletedIdentifierWhenAnotherRequestIsActive() {
+        let promptKey = self.promptKey(id: 10)
+        let completedIdentifier = self.identifier(clientID: 1)
+        let activeIdentifier = self.identifier(clientID: 2)
+
+        XCTAssertNil(
+            AuthenticationRequestAssociation.unassignedCompletedIdentifier(
+                requesterProcessID: 200,
+                evidence: [
+                    event(pid: 200, identifier: completedIdentifier),
+                    event(pid: 200, identifier: activeIdentifier)
+                ],
+                currentEvidence: [
+                    event(pid: 200, identifier: activeIdentifier)
+                ],
+                completedIdentifiers: [completedIdentifier],
+                existingMappings: [:],
+                promptKey: promptKey
+            )
+        )
+    }
+
+    func testDoesNotAssociateCompletedRequestWhenReplacementBeganDuringScan() {
+        let promptKey = self.promptKey(id: 10)
+        let completedIdentifier = self.identifier(clientID: 1)
+        let replacementIdentifier = self.identifier(clientID: 2)
+
+        XCTAssertNil(
+            AuthenticationRequestAssociation.unassignedCompletedIdentifier(
+                requesterProcessID: 200,
+                evidence: [
+                    event(pid: 200, identifier: completedIdentifier)
+                ],
+                currentEvidence: [
+                    event(pid: 200, identifier: replacementIdentifier)
+                ],
+                completedIdentifiers: [completedIdentifier],
+                existingMappings: [:],
+                promptKey: promptKey
+            )
+        )
+    }
+
+    func testDoesNotAssociateCompletedRequestWhenReplacementHasNoLifecycleIdentifier() {
+        let promptKey = self.promptKey(id: 10)
+        let completedIdentifier = self.identifier(clientID: 1)
+
+        XCTAssertNil(
+            AuthenticationRequestAssociation.unassignedCompletedIdentifier(
+                requesterProcessID: 200,
+                evidence: [
+                    event(pid: 200, identifier: completedIdentifier)
+                ],
+                currentEvidence: [
+                    event(pid: 200, identifier: nil)
+                ],
+                completedIdentifiers: [completedIdentifier],
+                existingMappings: [:],
+                promptKey: promptKey
+            )
+        )
+    }
+
+    func testRejectsAmbiguousRequestsFromSameProcess() {
+        let promptKey = self.promptKey(id: 10)
+
+        XCTAssertNil(
+            AuthenticationRequestAssociation.unassignedActiveIdentifier(
+                requesterProcessID: 200,
+                evidence: [
+                    event(pid: 200, identifier: identifier(clientID: 1)),
+                    event(pid: 200, identifier: identifier(clientID: 2))
+                ],
+                completedIdentifiers: [],
+                existingMappings: [:],
+                promptKey: promptKey
+            )
+        )
+    }
+
+    func testDoesNotAssignOneRequestToTwoPromptSessions() {
+        let firstPrompt = promptKey(id: 10)
+        let secondPrompt = promptKey(id: 11)
+        let identifier = self.identifier(clientID: 1)
+
+        XCTAssertNil(
+            AuthenticationRequestAssociation.unassignedActiveIdentifier(
+                requesterProcessID: 200,
+                evidence: [event(pid: 200, identifier: identifier)],
+                completedIdentifiers: [],
+                existingMappings: [firstPrompt: identifier],
+                promptKey: secondPrompt
+            )
+        )
+    }
+
+    func testTransferAlwaysRemovesOldMappingAndPreservesExistingDestination() {
+        let oldPrompt = promptKey(id: 10)
+        let newPrompt = promptKey(id: 11)
+        let oldIdentifier = identifier(clientID: 1)
+        let existingIdentifier = identifier(clientID: 2)
+        var mappings = [
+            oldPrompt: oldIdentifier,
+            newPrompt: existingIdentifier
+        ]
+
+        AuthenticationRequestAssociation.transferMapping(
+            in: &mappings,
+            from: oldPrompt,
+            to: newPrompt
+        )
+
+        XCTAssertNil(mappings[oldPrompt])
+        XCTAssertEqual(mappings[newPrompt], existingIdentifier)
+    }
+
+    private func event(
+        pid: pid_t,
+        identifier: AuthenticationRequestIdentifier?
+    ) -> AuthenticationClientEvent {
+        AuthenticationClientEvent(
+            processID: pid,
+            executablePath: "/Applications/Example.app/Contents/MacOS/Example",
+            receivedAt: Date(timeIntervalSince1970: 100),
+            source: .localAuthentication,
+            requestIdentifier: identifier
+        )
+    }
+
+    private func identifier(clientID: UInt64) -> AuthenticationRequestIdentifier {
+        .localAuthentication(
+            LocalAuthenticationRequestKey(
+                processID: 200,
+                executablePath: "/Applications/Example.app/Contents/MacOS/Example",
+                operation: .evaluatePolicy,
+                contextComponents: [1, 2, 3],
+                clientID: clientID
+            )
+        )
+    }
+
+    private func promptKey(id: CGWindowID) -> AuthenticationPromptSessionKey {
+        let frame = CGRect(x: 100, y: 200, width: 260, height: 289)
+        return AuthenticationPromptSessionKey(
+            window: AuthenticationWindowSnapshot(
+                identity: .coreGraphics(id),
+                processID: 300,
+                surfaceKind: .localAuthentication,
+                coreGraphicsFrame: frame,
+                frame: frame,
+                visibleFrame: CGRect(x: 0, y: 24, width: 1920, height: 1056)
+            )
         )
     }
 }

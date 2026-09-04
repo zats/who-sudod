@@ -886,114 +886,51 @@ final class ProcessTableRowBuilderTests: XCTestCase {
     }
 
     @MainActor
-    func testModeToggleUsesTheCorrectVisibilityDirectionAndRequestedMode() throws {
-        let diameter = ProcessPanelMetrics.modeControlDiameter
-        let control = ProcessModeToggleControl(
-            frame: NSRect(x: 0, y: 0, width: diameter, height: diameter)
-        )
+    func testDisplayModeButtonUsesExpandAndContractSymbolsAndRequestsNextMode() {
+        let control = ProcessDisplayModeButton(displayMode: .simple)
         var requestedModes: [ProcessDisplayMode] = []
         control.onModeRequest = { requestedModes.append($0) }
 
         XCTAssertFalse(control.isHidden)
-        XCTAssertEqual(control.alphaValue, 0)
-        control.setHovered(true)
-
-        XCTAssertFalse(control.isHidden)
         XCTAssertEqual(control.alphaValue, 1)
-        XCTAssertFalse(control.isBordered)
-        XCTAssertEqual(control.frame.width, control.frame.height)
+        XCTAssertEqual(control.bezelStyle, .inline)
+        XCTAssertEqual(control.controlSize, .small)
+        XCTAssertEqual(control.imagePosition, .imageOnly)
         XCTAssertEqual(
-            control.layer?.cornerRadius,
-            ProcessPanelMetrics.modeControlDiameter / 2
+            control.intrinsicContentSize,
+            NSSize(
+                width: ProcessPanelMetrics.modeButtonHitSize,
+                height: ProcessPanelMetrics.modeButtonHitSize
+            )
         )
-        XCTAssertEqual(control.layer?.backgroundColor?.alpha, 1)
-        XCTAssertEqual(control.layer?.borderWidth, 0)
         XCTAssertEqual(control.toolTip, "Advanced")
         XCTAssertEqual(control.accessibilityLabel(), "Advanced")
-        XCTAssertEqual(control.direction, .right)
-        XCTAssertNotNil(control.symbolImage)
         XCTAssertEqual(
-            control.symbolDrawingRect.midX,
-            control.bounds.midX + ProcessPanelMetrics.modeControlSymbolOpticalOffset,
-            accuracy: 0.001
+            control.systemSymbolName,
+            "arrow.up.left.and.arrow.down.right"
         )
-        XCTAssertEqual(control.symbolDrawingRect.midY, control.bounds.midY, accuracy: 0.001)
-        XCTAssertEqual(control.outerStrokeAngles.lowerBound, -90)
-        XCTAssertEqual(control.outerStrokeAngles.upperBound, 90)
+        XCTAssertNotNil(control.image)
         XCTAssertTrue(control.acceptsFirstMouse(for: nil))
 
         control.performClick(nil)
         XCTAssertEqual(requestedModes, [.fullTree])
 
         control.setDisplayMode(.fullTree)
-        control.setHovered(false)
-
         XCTAssertFalse(control.isHidden)
-        XCTAssertEqual(control.toolTip, "Collapse")
-        XCTAssertEqual(control.accessibilityLabel(), "Collapse")
-        XCTAssertEqual(control.direction, .left)
+        XCTAssertEqual(control.alphaValue, 1)
+        XCTAssertEqual(control.toolTip, "Compact")
+        XCTAssertEqual(control.accessibilityLabel(), "Compact")
         XCTAssertEqual(
-            control.symbolDrawingRect.midX,
-            control.bounds.midX - ProcessPanelMetrics.modeControlSymbolOpticalOffset,
-            accuracy: 0.001
+            control.systemSymbolName,
+            "arrow.down.right.and.arrow.up.left"
         )
-        XCTAssertEqual(control.symbolDrawingRect.midY, control.bounds.midY, accuracy: 0.001)
-        XCTAssertEqual(control.outerStrokeAngles.lowerBound, -90)
-        XCTAssertEqual(control.outerStrokeAngles.upperBound, 90)
 
         control.performClick(nil)
         XCTAssertEqual(requestedModes, [.fullTree, .simple])
-
-        control.setAttachmentSide(.left)
-        XCTAssertEqual(control.direction, .right)
-        XCTAssertEqual(
-            control.symbolDrawingRect.midX,
-            control.bounds.midX + ProcessPanelMetrics.modeControlSymbolOpticalOffset,
-            accuracy: 0.001
-        )
-        XCTAssertEqual(control.outerStrokeAngles.lowerBound, 90)
-        XCTAssertEqual(control.outerStrokeAngles.upperBound, 270)
-
-        control.setDisplayMode(.simple)
-        XCTAssertEqual(control.direction, .left)
-        XCTAssertEqual(
-            control.symbolDrawingRect.midX,
-            control.bounds.midX - ProcessPanelMetrics.modeControlSymbolOpticalOffset,
-            accuracy: 0.001
-        )
-        XCTAssertEqual(control.outerStrokeAngles.lowerBound, 90)
-        XCTAssertEqual(control.outerStrokeAngles.upperBound, 270)
-        XCTAssertFalse(control.isHidden)
-        XCTAssertEqual(control.alphaValue, 0)
     }
 
     @MainActor
-    func testHoverTrackingViewReportsEntryAndExit() throws {
-        let view = HoverTrackingView(frame: NSRect(x: 0, y: 0, width: 100, height: 100))
-        var states: [Bool] = []
-        view.onHoverChange = { states.append($0) }
-        let event = try XCTUnwrap(
-            NSEvent.mouseEvent(
-                with: .mouseMoved,
-                location: .zero,
-                modifierFlags: [],
-                timestamp: 0,
-                windowNumber: 0,
-                context: nil,
-                eventNumber: 0,
-                clickCount: 0,
-                pressure: 0
-            )
-        )
-
-        view.mouseEntered(with: event)
-        view.mouseExited(with: event)
-
-        XCTAssertEqual(states, [true, false])
-    }
-
-    @MainActor
-    func testPanelModeToggleLayoutAndBehaviorForBothAttachmentSides() throws {
+    func testDialogDisplayModeButtonOverlaysOuterTopTableCornerForBothSides() throws {
         let contentWidth = ProcessPanelMetrics.contentWidth(
             for: .simple,
             availableAdvancedContentWidth: ProcessPanelMetrics.advancedContentWidth
@@ -1004,9 +941,7 @@ final class ProcessTableRowBuilderTests: XCTestCase {
                 frame: NSRect(
                     x: 0,
                     y: 0,
-                    width: 300
-                        + contentWidth
-                        + ProcessPanelMetrics.modeControlWindowMargin,
+                    width: 300 + contentWidth,
                     height: 297
                 ),
                 displayMode: .simple,
@@ -1022,93 +957,85 @@ final class ProcessTableRowBuilderTests: XCTestCase {
             window.contentView = content
             window.layoutIfNeeded()
 
-            let hoverView = try XCTUnwrap(firstSubview(of: HoverTrackingView.self, in: content))
             let control = try XCTUnwrap(
-                firstSubview(of: ProcessModeToggleControl.self, in: content)
+                firstSubview(of: ProcessDisplayModeButton.self, in: content)
             )
             let material = try XCTUnwrap(
                 firstSubview(of: NSVisualEffectView.self, in: content)
             )
             let table = try XCTUnwrap(firstSubview(of: ProcessTableView.self, in: content))
-            let event = try XCTUnwrap(
-                NSEvent.mouseEvent(
-                    with: .mouseMoved,
-                    location: .zero,
-                    modifierFlags: [],
-                    timestamp: 0,
-                    windowNumber: window.windowNumber,
-                    context: nil,
-                    eventNumber: 0,
-                    clickCount: 0,
-                    pressure: 0
-                )
-            )
-
-            XCTAssertFalse(control.isHidden)
-            XCTAssertEqual(control.alphaValue, 0)
-            let hiddenControlCenter = control.convert(
-                NSPoint(x: control.bounds.midX, y: control.bounds.midY),
-                to: content
-            )
-            XCTAssertTrue(
-                hoverView.hitTest(hiddenControlCenter) === control,
-                "body=\(hoverView.bounds) control=\(control.frame) point=\(hiddenControlCenter)"
-            )
-            hoverView.mouseEntered(with: event)
-            window.layoutIfNeeded()
 
             let controlFrame = control.convert(control.bounds, to: content)
+            let tableFrame = table.convert(table.bounds, to: content)
             XCTAssertFalse(control.isHidden)
-            XCTAssertEqual(control.alphaValue, 1)
             XCTAssertEqual(control.toolTip, "Advanced")
+            XCTAssertEqual(control.bezelStyle, .inline)
+            XCTAssertFalse(control.isBordered)
+            XCTAssertEqual(control.borderShape, .circle)
+            XCTAssertEqual(
+                control.layer?.cornerRadius,
+                ProcessPanelMetrics.dialogModeButtonDiameter / 2
+            )
+            XCTAssertEqual(control.layer?.borderWidth, 0)
+            XCTAssertEqual(
+                control.intrinsicContentSize,
+                NSSize(
+                    width: ProcessPanelMetrics.dialogModeButtonDiameter,
+                    height: ProcessPanelMetrics.dialogModeButtonDiameter
+                )
+            )
+            XCTAssertEqual(control.alphaValue, 0)
             XCTAssertTrue(table.isDescendant(of: material))
+            XCTAssertTrue(control.isDescendant(of: material))
             XCTAssertTrue(material.layer?.masksToBounds == true)
-            XCTAssertEqual(controlFrame.width, ProcessPanelMetrics.modeControlDiameter)
-            XCTAssertEqual(controlFrame.height, ProcessPanelMetrics.modeControlDiameter)
+            XCTAssertTrue(content.bounds.contains(controlFrame))
+            XCTAssertEqual(
+                content.bounds.maxY - controlFrame.maxY,
+                10,
+                accuracy: 0.5
+            )
             let controlCenter = control.convert(
                 NSPoint(x: control.bounds.midX, y: control.bounds.midY),
                 to: content
             )
             XCTAssertTrue(
-                hoverView.hitTest(controlCenter) === control,
-                "body=\(hoverView.bounds) control=\(control.frame) point=\(controlCenter)"
+                material.hitTest(controlCenter) === control,
+                "material=\(material.bounds) control=\(control.frame) point=\(controlCenter)"
             )
-            let emptyBodyPoint = hoverView.convert(
-                NSPoint(x: hoverView.bounds.midX, y: 12),
-                to: content
+            let tablePoint = NSPoint(
+                x: side == .right ? tableFrame.minX + 8 : tableFrame.maxX - 8,
+                y: tableFrame.midY
             )
-            XCTAssertNil(hoverView.hitTest(emptyBodyPoint))
+            let tableHit = material.hitTest(tablePoint)
+            XCTAssertTrue(tableHit === table || tableHit?.isDescendant(of: table) == true)
             if side == .right {
-                XCTAssertEqual(control.direction, .right)
-                XCTAssertEqual(controlFrame.midX, material.frame.maxX, accuracy: 0.5)
-                XCTAssertEqual(controlFrame.maxX, content.bounds.maxX, accuracy: 0.5)
-                XCTAssertEqual(control.outerStrokeAngles.lowerBound, -90)
-                XCTAssertEqual(control.outerStrokeAngles.upperBound, 90)
+                XCTAssertEqual(
+                    content.bounds.maxX - controlFrame.maxX,
+                    10,
+                    accuracy: 0.5
+                )
             } else {
-                XCTAssertEqual(control.direction, .left)
-                XCTAssertEqual(controlFrame.midX, material.frame.minX, accuracy: 0.5)
-                XCTAssertEqual(controlFrame.minX, content.bounds.minX, accuracy: 0.5)
-                XCTAssertEqual(control.outerStrokeAngles.lowerBound, 90)
-                XCTAssertEqual(control.outerStrokeAngles.upperBound, 270)
+                XCTAssertEqual(
+                    controlFrame.minX - content.bounds.minX,
+                    10,
+                    accuracy: 0.5
+                )
             }
 
+            content.setHovered(true)
+            XCTAssertEqual(control.alphaValue, 1)
             control.performClick(nil)
             XCTAssertEqual(requestedModes, [.fullTree])
 
             content.setDisplayMode(.fullTree)
-            hoverView.mouseExited(with: event)
+            content.setHovered(false)
 
             XCTAssertFalse(control.isHidden)
             XCTAssertEqual(control.alphaValue, 1)
-            XCTAssertEqual(control.toolTip, "Collapse")
-            XCTAssertEqual(control.direction, side == .right ? .left : .right)
+            XCTAssertEqual(control.toolTip, "Compact")
             XCTAssertEqual(
-                control.outerStrokeAngles.lowerBound,
-                side == .right ? -90 : 90
-            )
-            XCTAssertEqual(
-                control.outerStrokeAngles.upperBound,
-                side == .right ? 90 : 270
+                control.systemSymbolName,
+                "arrow.down.right.and.arrow.up.left"
             )
 
             control.performClick(nil)
@@ -1239,6 +1166,8 @@ final class ProcessTableRowBuilderTests: XCTestCase {
         try diagnostics.recordVisible(
             promptSequence: 1,
             surfaceKind: .securityAgent,
+            presentation: "dialog",
+            passwordInputVisible: false,
             snapshot: snapshot,
             renderedTable: RenderedProcessTable(isComplete: true, rows: rows)
         )
@@ -1246,7 +1175,7 @@ final class ProcessTableRowBuilderTests: XCTestCase {
             LiveTreeDiagnosticState.self,
             from: Data(contentsOf: stateURL)
         )
-        XCTAssertEqual(first.schemaVersion, 3)
+        XCTAssertEqual(first.schemaVersion, 4)
         XCTAssertEqual(first.runID, "test-run")
         XCTAssertEqual(first.writeSequence, 1)
         XCTAssertEqual(first.promptSequence, 1)
@@ -1256,6 +1185,8 @@ final class ProcessTableRowBuilderTests: XCTestCase {
         XCTAssertGreaterThan(first.writtenAtUptime, 0)
         XCTAssertTrue(first.renderingComplete)
         XCTAssertEqual(first.surfaceKind, "securityAgent")
+        XCTAssertEqual(first.presentation, "dialog")
+        XCTAssertFalse(first.passwordInputVisible)
         XCTAssertEqual(first.inspectionState, "complete")
         XCTAssertEqual(first.requestKind, "sudo")
         XCTAssertEqual(first.attribution, "heuristicSudo")
@@ -1265,6 +1196,8 @@ final class ProcessTableRowBuilderTests: XCTestCase {
         try diagnostics.recordVisible(
             promptSequence: 1,
             surfaceKind: .securityAgent,
+            presentation: "dialog",
+            passwordInputVisible: false,
             snapshot: snapshot,
             renderedTable: RenderedProcessTable(isComplete: true, rows: rows)
         )
@@ -1286,7 +1219,54 @@ final class ProcessTableRowBuilderTests: XCTestCase {
         XCTAssertEqual(hidden.writeSequence, 2)
         XCTAssertEqual(hidden.visibility, .hidden)
         XCTAssertFalse(hidden.promptPresent)
+        XCTAssertNil(hidden.presentation)
+        XCTAssertFalse(hidden.passwordInputVisible)
         XCTAssertTrue(hidden.rows.isEmpty)
+    }
+
+    func testLiveTreeDiagnosticsRecordsNotchPasswordInputChanges() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "who-sudod-live-tree-\(UUID().uuidString)",
+            isDirectory: true
+        )
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let stateURL = directory.appendingPathComponent("state.json")
+        var diagnostics = try XCTUnwrap(
+            LiveTreeDiagnostics(runID: "test-run", stateURL: stateURL)
+        )
+        let snapshot = sudoSnapshot(processArguments: ["sudo", "-v"])
+        let rows = ProcessTablePresentationBuilder.rows(for: snapshot, mode: .fullTree)
+
+        for (index, passwordInputVisible) in [false, true, false].enumerated() {
+            try diagnostics.recordVisible(
+                promptSequence: 1,
+                surfaceKind: .terminalPassword,
+                presentation: "notch",
+                passwordInputVisible: passwordInputVisible,
+                snapshot: snapshot,
+                renderedTable: RenderedProcessTable(isComplete: true, rows: rows)
+            )
+            let state = try JSONDecoder().decode(
+                LiveTreeDiagnosticState.self,
+                from: Data(contentsOf: stateURL)
+            )
+            XCTAssertEqual(state.writeSequence, index + 1)
+            XCTAssertEqual(state.surfaceKind, "terminalPassword")
+            XCTAssertEqual(state.presentation, "notch")
+            XCTAssertEqual(state.passwordInputVisible, passwordInputVisible)
+            XCTAssertEqual(state.rows, rows)
+        }
+
+        try diagnostics.recordReadiness(accessibilityTrusted: true, promptSequence: 1)
+        let readiness = try JSONDecoder().decode(
+            LiveTreeDiagnosticState.self,
+            from: Data(contentsOf: stateURL)
+        )
+        XCTAssertEqual(readiness.visibility, .hidden)
+        XCTAssertNil(readiness.presentation)
+        XCTAssertFalse(readiness.passwordInputVisible)
+        XCTAssertTrue(readiness.rows.isEmpty)
     }
 #endif
 
@@ -1393,6 +1373,26 @@ final class ProcessTableRowBuilderTests: XCTestCase {
         let sudo = ProcessRecord(
             pid: 300,
             parentPID: 0,
+            realUserID: 502,
+            name: "sudo",
+            executablePath: "/usr/bin/sudo",
+            startTime: ProcessStartTime(seconds: 3, microseconds: 0),
+            processArguments: processArguments
+        )
+        return ProcessTreeBuilder.build(
+            records: [sudo],
+            requesterIdentities: [sudo.identity],
+            requestKind: .sudo,
+            attribution: .heuristicSudo
+        )
+    }
+
+    private func brightness(of color: CGColor?) throws -> CGFloat {
+        let color = try XCTUnwrap(color)
+        let converted = try XCTUnwrap(NSColor(cgColor: color)?.usingColorSpace(.deviceRGB))
+        return converted.brightnessComponent
+    }
+
     @MainActor
     private func processIconOffsets(in processTable: ProcessTableView) -> [CGFloat] {
         guard let tableView = firstSubview(of: NSTableView.self, in: processTable) else {
@@ -1426,26 +1426,6 @@ final class ProcessTableRowBuilderTests: XCTestCase {
                 makeIfNecessary: true
             ).map(ObjectIdentifier.init)
         }
-    }
-
-            realUserID: 502,
-            name: "sudo",
-            executablePath: "/usr/bin/sudo",
-            startTime: ProcessStartTime(seconds: 3, microseconds: 0),
-            processArguments: processArguments
-        )
-        return ProcessTreeBuilder.build(
-            records: [sudo],
-            requesterIdentities: [sudo.identity],
-            requestKind: .sudo,
-            attribution: .heuristicSudo
-        )
-    }
-
-    private func brightness(of color: CGColor?) throws -> CGFloat {
-        let color = try XCTUnwrap(color)
-        let converted = try XCTUnwrap(NSColor(cgColor: color)?.usingColorSpace(.deviceRGB))
-        return converted.brightnessComponent
     }
 
     @MainActor

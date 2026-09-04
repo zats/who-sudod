@@ -3,6 +3,7 @@ import SwiftUI
 struct SettingsView: View {
     @Bindable var model: SettingsModel
     let launchAtLogin: LaunchAtLoginController
+    let accessibilityPermission: AccessibilityPermissionController
     let ignoredApplicationsViewController: IgnoredApplicationsSettingsViewController
 
     var body: some View {
@@ -20,6 +21,7 @@ struct SettingsView: View {
             SettingsDetailView(
                 model: model,
                 launchAtLogin: launchAtLogin,
+                accessibilityPermission: accessibilityPermission,
                 ignoredApplicationsViewController: ignoredApplicationsViewController
             )
             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -112,6 +114,7 @@ private struct SettingsIconChip: View {
 private struct SettingsDetailView: View {
     let model: SettingsModel
     let launchAtLogin: LaunchAtLoginController
+    let accessibilityPermission: AccessibilityPermissionController
     let ignoredApplicationsViewController: IgnoredApplicationsSettingsViewController
 
     var body: some View {
@@ -120,7 +123,8 @@ private struct SettingsDetailView: View {
             case .general:
                 GeneralSettingsPane(
                     model: model,
-                    launchAtLogin: launchAtLogin
+                    launchAtLogin: launchAtLogin,
+                    accessibilityPermission: accessibilityPermission
                 )
             case .ignoredApps:
                 IgnoredApplicationsPane(
@@ -135,10 +139,14 @@ private struct SettingsDetailView: View {
 private struct GeneralSettingsPane: View {
     @Bindable var model: SettingsModel
     let launchAtLogin: LaunchAtLoginController
+    let accessibilityPermission: AccessibilityPermissionController
 
     var body: some View {
         Form {
-            PAMSettingsSection(model: model)
+            PermissionsSettingsSection(
+                model: model,
+                accessibilityPermission: accessibilityPermission
+            )
             LaunchAtLoginSettingsSection(controller: launchAtLogin)
         }
         .formStyle(.grouped)
@@ -147,35 +155,31 @@ private struct GeneralSettingsPane: View {
     }
 }
 
-private struct PAMSettingsSection: View {
+private struct PermissionsSettingsSection: View {
     @Bindable var model: SettingsModel
+    @Bindable var accessibilityPermission: AccessibilityPermissionController
 
     var body: some View {
         let presentation = model.pamPresentation
         Section {
-            LabeledContent {
-                if presentation.isLoading {
-                    ProgressView()
-                        .controlSize(.small)
+            LabeledContent("Accessibility") {
+                if accessibilityPermission.isGranted {
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundStyle(.green)
+                        .accessibilityLabel("Allowed")
                 } else {
-                    Button(presentation.actionTitle) {
-                        model.requestPAMAction()
-                    }
-                    .disabled(presentation.action == nil)
-                }
-            } label: {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("PAM")
-                    if let detail = presentation.detail, !detail.isEmpty {
-                        Text(detail)
-                            .font(.caption)
-                            .foregroundStyle(presentation.isWarning ? .orange : .secondary)
+                    Button("Allow…") {
+                        accessibilityPermission.requestAccess()
                     }
                 }
-                .fixedSize(horizontal: false, vertical: true)
             }
+
+            PAMSettingsRow(
+                presentation: presentation,
+                requestAction: model.requestPAMAction
+            )
         } header: {
-            Text("Password Input")
+            Text("Permissions")
         } footer: {
             Text("Allows to enter sudo passwords here, while keeping your preferred terminal app working as is. Your passwords never leave your computer.")
                 .font(.caption)
@@ -200,6 +204,35 @@ private struct PAMSettingsSection: View {
             }
         } message: { action in
             Text(action.confirmationMessage)
+        }
+    }
+}
+
+private struct PAMSettingsRow: View {
+    let presentation: PAMSettingsPresentation
+    let requestAction: () -> Void
+
+    var body: some View {
+        LabeledContent {
+            if presentation.isLoading {
+                ProgressView()
+                    .controlSize(.small)
+            } else {
+                Button(presentation.actionTitle) {
+                    requestAction()
+                }
+                .disabled(presentation.action == nil)
+            }
+        } label: {
+            VStack(alignment: .leading, spacing: 2) {
+                Text("PAM")
+                if let detail = presentation.detail, !detail.isEmpty {
+                    Text(detail)
+                        .font(.caption)
+                        .foregroundStyle(presentation.isWarning ? .orange : .secondary)
+                }
+            }
+            .fixedSize(horizontal: false, vertical: true)
         }
     }
 }

@@ -173,6 +173,43 @@ struct ProcessIdentity: Hashable, Sendable {
     let startTime: ProcessStartTime
 }
 
+enum ProcessIdentityLiveness {
+    static func isRunning(_ identity: ProcessIdentity) -> Bool {
+        currentIdentity(processID: identity.pid) == identity
+    }
+
+    static func currentIdentity(processID: pid_t) -> ProcessIdentity? {
+        var managementInformationBase: [Int32] = [
+            CTL_KERN,
+            KERN_PROC,
+            KERN_PROC_PID,
+            processID
+        ]
+        var entry = kinfo_proc()
+        var size = MemoryLayout<kinfo_proc>.stride
+        guard sysctl(
+            &managementInformationBase,
+            4,
+            &entry,
+            &size,
+            nil,
+            0
+        ) == 0,
+        size == MemoryLayout<kinfo_proc>.stride,
+        entry.kp_proc.p_pid == processID else {
+            return nil
+        }
+        let start = entry.kp_proc.p_un.__p_starttime
+        return ProcessIdentity(
+            pid: processID,
+            startTime: ProcessStartTime(
+                seconds: UInt64(max(0, start.tv_sec)),
+                microseconds: UInt64(max(0, start.tv_usec))
+            )
+        )
+    }
+}
+
 struct ProcessRecord: Hashable, Sendable {
     let pid: pid_t
     let parentPID: pid_t

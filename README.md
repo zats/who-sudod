@@ -1,6 +1,6 @@
 # Who Sudo'd
 
-Who Sudo'd adds a passive process panel beside macOS authentication requests. It detects dialogs from SecurityAgent and the LocalAuthentication UI agent. It also detects an interactive `/usr/bin/sudo` process that waits for a hidden password in a terminal, even though macOS does not show a system dialog. For a system dialog, the panel background extends 20 points around the dialog and continues behind it. For a terminal password request, the standalone panel stays tied to the focused window of the nearest active ancestor app. The panel shows the observed or likely live requester with its parent and descendant processes.
+Who Sudo'd adds a passive process panel beside macOS authentication requests. It detects dialogs from SecurityAgent and the LocalAuthentication UI agent. It also detects an interactive `/usr/bin/sudo` process that waits for a hidden password in a terminal, even though macOS does not show a system dialog. For a system dialog, the panel background extends 20 points around the dialog and continues behind it. Without a system dialog, the process tree opens from the notch on the active display. On a display without a notch, it opens at the top center. Focus changes do not hide an active request, and the notch moves when the active app moves to another display. The view closes when the request ends or when the user dismisses the notch. The panel shows the observed or likely live requester with its parent and descendant processes.
 
 The requested command does not normally start until authentication succeeds. Who Sudo'd therefore shows it as a pending row with no numeric PID. This row comes from the live sudo command line; it is not presented as a live child process. Any actual descendants use numeric PIDs. Process names use the containing app bundle's display name when the executable is the app's main executable.
 
@@ -33,15 +33,15 @@ Who Sudo'd runs as a menu bar app. Its key icon shows the current monitor state.
 
 Who Sudo'd monitors narrow unified-log records from LocalAuthentication and Authorization Services. A LocalAuthentication evaluation record supplies the client PID and executable path. An Authorization Services shell record supplies the caller PID. The app then checks that PID, executable path, start time, and real user against the live kernel process table before it displays the process tree. It keeps the observed `(PID, start time)` identity pinned while the request remains active. If an observed requester exits first, the panel retains its last known tree.
 
-SecurityAgent windows are verified by their exact Apple executable path and Core Graphics window metadata. LocalAuthentication secure windows are not present in the Core Graphics window list on current macOS. For those windows, the app verifies the exact `coreautha` or LocalAuthentication remote-service executable and reads its focused Accessibility window frame.
+SecurityAgent windows are verified by their exact Apple executable path and Core Graphics window metadata. LocalAuthentication secure windows are not present in the Core Graphics window list on current macOS. For those windows, the app verifies the exact `coreautha` or LocalAuthentication remote-service executable and reads its Accessibility window frames.
 
 Some `sudo` prompts do not provide a usable direct caller record. For these prompts, the app uses a heuristic fallback. For a terminal password request, it requires an exact `/usr/bin/sudo` process for the signed-in user, effective root access, a controlling terminal, ownership of the terminal foreground process group, disabled terminal echo, canonical terminal input, and no started child command. Canonical input separates a sudo password read from shells such as fish, which can disable echo while they edit in noncanonical mode. The app confirms the change into this password-input mode when it sees that change. If the first scan of a new terminal occurs during a new prompt for an external command, it can instead confirm the complete password-input state across three scans. That no-baseline fallback applies only to a `sudo` process that is at most five seconds old. The app reads terminal settings only. It does not read terminal bytes. It does not use this fallback for a LocalAuthentication-only window.
 
 The app reads the pending invocation through Apple's `/bin/ps` because macOS blocks an unprivileged process from reading the effective-root sudo argument data directly. The `ps` result is display text and can lose exact argument boundaries. The row is therefore a readable requested command, not a guaranteed structured argument vector.
 
-macOS does not provide a general mapping from a terminal device to an app window or tab. The panel therefore does not claim exact tab attribution. If the user changes to another existing window in the same app, the panel hides instead of moving to that window.
+macOS does not provide a general mapping from a terminal device to an app window or tab. The panel therefore does not claim exact tab attribution. After it finds a request, it keeps the last known terminal window only as a presentation fallback. The notch stays visible and follows the active app's display.
 
-Without the optional PAM feature, the app does not read authentication payloads, passwords, or text-field values. When the feature is installed, a signed PAM module offers app input only after the PAM stack reaches the standard account-password prompt. A successful Touch ID, smart-card, YubiKey, or other earlier `sufficient` PAM method bypasses this path. The signed terminal reader supplies the normal hidden password input at the same time as the app. The first complete password wins, and **Use Terminal** removes only the app option. Who Sudo'd sends an app-entered password directly to the waiting PAM conversation and does not log or store it. Other prompt text and multi-prompt conversations use the original PAM conversation only.
+Without the optional PAM feature, the app does not read authentication payloads, passwords, or text-field values. For a terminal sudo prompt, the notch offers the current **Install…** or **Repair…** action from Settings when that action is safe. When the feature is installed, a signed PAM module offers input in the notch only after the PAM stack reaches the standard account-password prompt. A successful Touch ID, smart-card, YubiKey, or other earlier `sufficient` PAM method bypasses this path. The signed terminal reader supplies the normal hidden password input at the same time as the app. The first complete password wins, so the user can enter it in either the terminal or the notch. Who Sudo'd sends an app-entered password directly to the waiting PAM conversation and does not log or store it. Other prompt text and multi-prompt conversations use the original PAM conversation only.
 
 The optional input path does not run for `sudo -n`, `sudo -S`, or `sudo -A`. After the app accepts a request, the terminal reader uses a plain `Password:` prompt and a five-minute input limit. It cannot preserve a custom `sudo -p` prompt, `SUDO_PROMPT`, `pwfeedback`, a configured password timeout, or prompt bells. If the helper cannot start after the app route is ready, authentication stops with a conversation error instead of showing a second password prompt.
 
@@ -55,10 +55,12 @@ xcodebuild -project WhoSudod.xcodeproj -scheme WhoSudod -destination 'platform=m
 Tools/test-pam.zsh
 ```
 
-Run the deterministic password-only sudo check after Accessibility access is enabled:
+Run the deterministic password-only sudo check after Accessibility access is enabled. Use `terminal-pam` with PAM installed, or `terminal-password` without it:
 
 ```sh
-Tools/check-auth-live-tree.zsh terminal-password
+Tools/check-auth-live-tree.zsh terminal-pam
 ```
 
-The check creates a private terminal, starts a real password-waiting `sudo`, compares every displayed row with the expected live process tree, cancels the request, and confirms that the panel hides. It does not enter or read a password.
+The check creates a private terminal, starts a real password-waiting `sudo`, compares every displayed row with the expected live process tree, checks notch presentation and password-field visibility, cancels the request, and confirms that the panel hides. It does not enter or read a password.
+
+The notch surface uses the MIT-licensed [DynamicNotchKit](https://github.com/zats/DynamicNotchKit) low-level panel APIs. The dependency is pinned in `project.yml`, and its license is included with the app.

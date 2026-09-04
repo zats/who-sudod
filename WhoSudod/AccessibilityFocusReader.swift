@@ -1,6 +1,11 @@
 import AppKit
 import ApplicationServices
 
+struct AccessibilityWindowReference: Equatable, Sendable {
+    let elementIdentifier: UInt
+    let frame: CGRect
+}
+
 enum AccessibilityWindowFocusResolver {
     static func resolve(
         frameMatches: Bool,
@@ -69,17 +74,43 @@ enum AccessibilityFocusReader {
     /// Returns the focused AX window frame in the global, top-left-origin
     /// coordinate space used by `CGWindow` bounds.
     static func focusedWindowFrame(processID: pid_t) -> CGRect? {
+        focusedWindowReference(processID: processID)?.frame
+    }
+
+    static func focusedWindowReference(
+        processID: pid_t
+    ) -> AccessibilityWindowReference? {
+        guard isTrusted,
+              let focusedWindow = focusedWindow(processID: processID) else {
+            return nil
+        }
+        return windowReference(for: focusedWindow)
+    }
+
+    /// Returns all AX window frames for a process. Unlike
+    /// `focusedWindowFrame`, this continues to work when another app is
+    /// frontmost or the window is on another Space.
+    static func windowFrames(processID: pid_t) -> [CGRect] {
+        windowReferences(processID: processID).map(\.frame)
+    }
+
+    static func windowReferences(
+        processID: pid_t
+    ) -> [AccessibilityWindowReference] {
         guard isTrusted else {
-            return nil
+            return []
         }
-        guard let focusedWindow = focusedWindow(processID: processID) else {
-            return nil
+        let application = AXUIElementCreateApplication(processID)
+        var windowsValue: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(
+            application,
+            kAXWindowsAttribute as CFString,
+            &windowsValue
+        ) == .success,
+        let windows = windowsValue as? [AXUIElement] else {
+            return []
         }
-        guard let position = pointAttribute(kAXPositionAttribute, from: focusedWindow),
-              let size = sizeAttribute(kAXSizeAttribute, from: focusedWindow) else {
-            return nil
-        }
-        return CGRect(origin: position, size: size)
+        return windows.compactMap(windowReference(for:))
     }
 
     static func isFocusedWindow(
@@ -122,6 +153,19 @@ enum AccessibilityFocusReader {
             return nil
         }
         return unsafeDowncast(focusedWindowValue, to: AXUIElement.self)
+    }
+
+    private static func windowReference(
+        for window: AXUIElement
+    ) -> AccessibilityWindowReference? {
+        guard let position = pointAttribute(kAXPositionAttribute, from: window),
+              let size = sizeAttribute(kAXSizeAttribute, from: window) else {
+            return nil
+        }
+        return AccessibilityWindowReference(
+            elementIdentifier: CFHash(window),
+            frame: CGRect(origin: position, size: size)
+        )
     }
 
     private static func booleanAttribute(

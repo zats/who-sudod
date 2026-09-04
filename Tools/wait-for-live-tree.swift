@@ -22,6 +22,8 @@ struct DiagnosticState: Decodable {
     let promptPresent: Bool
     let renderingComplete: Bool
     let surfaceKind: String?
+    let presentation: String?
+    let passwordInputVisible: Bool
     let inspectionState: String
     let requestKind: String?
     let attribution: String?
@@ -34,8 +36,13 @@ struct ExpectedTree: Decodable {
     let inspectionState: String
     let requestKind: String
     let attribution: String
+    let passwordInputVisible: Bool
     let candidateCount: Int
     let rows: [PresentationRow]
+
+    var presentation: String {
+        surfaceKind == "terminalPassword" ? "notch" : "dialog"
+    }
 }
 
 enum Mode {
@@ -154,6 +161,7 @@ func differences(expected: ExpectedTree, actual: DiagnosticState?) -> String {
     let comparisons: [(String, String, String)] = [
         ("visibility", "visible", actual.visibility),
         ("surfaceKind", expected.surfaceKind, actual.surfaceKind ?? "<none>"),
+        ("presentation", expected.presentation, actual.presentation ?? "<none>"),
         ("inspectionState", expected.inspectionState, actual.inspectionState),
         ("requestKind", expected.requestKind, actual.requestKind ?? "<none>"),
         ("attribution", expected.attribution, actual.attribution ?? "<none>")
@@ -169,6 +177,11 @@ func differences(expected: ExpectedTree, actual: DiagnosticState?) -> String {
     }
     if !actual.renderingComplete {
         lines.append("renderingComplete: expected true, got false")
+    }
+    if actual.passwordInputVisible != expected.passwordInputVisible {
+        lines.append(
+            "passwordInputVisible: expected \(expected.passwordInputVisible), got \(actual.passwordInputVisible)"
+        )
     }
     if actual.candidateCount != expected.candidateCount {
         lines.append(
@@ -276,7 +289,7 @@ while Date() < deadline {
     }
     if let data = try? Data(contentsOf: stateURL),
        let state = try? decoder.decode(DiagnosticState.self, from: data),
-       state.schemaVersion == 3,
+       state.schemaVersion == 4,
        state.runID == runID {
         lastObservedState = state
         let stateAge = ProcessInfo.processInfo.systemUptime - state.writtenAtUptime
@@ -290,6 +303,8 @@ while Date() < deadline {
                 && !state.promptPresent
                 && state.renderingComplete
                 && state.surfaceKind == nil
+                && state.presentation == nil
+                && !state.passwordInputVisible
                 && state.requestKind == nil
                 && state.attribution == nil
                 && state.candidateCount == 0
@@ -302,6 +317,8 @@ while Date() < deadline {
                 && state.promptPresent
                 && state.renderingComplete
                 && state.surfaceKind == expected.surfaceKind
+                && state.presentation == expected.presentation
+                && state.passwordInputVisible == expected.passwordInputVisible
                 && state.inspectionState == expected.inspectionState
                 && state.requestKind == expected.requestKind
                 && state.attribution == expected.attribution
@@ -313,6 +330,8 @@ while Date() < deadline {
                 && state.accessibilityTrusted
                 && state.visibility == "hidden"
                 && !state.promptPresent
+                && state.presentation == nil
+                && !state.passwordInputVisible
                 && state.rows.isEmpty
         }
 
@@ -326,7 +345,7 @@ while Date() < deadline {
                     print("PASS ready runID=\(state.runID)")
                 case .tree:
                     print(
-                        "PASS tree runID=\(state.runID) promptSequence=\(state.promptSequence) rows=\(state.rows.count)"
+                        "PASS tree runID=\(state.runID) promptSequence=\(state.promptSequence) presentation=\(state.presentation ?? "<none>") passwordInputVisible=\(state.passwordInputVisible) rows=\(state.rows.count)"
                     )
                     for row in state.rows {
                         print("  \(row.process) [\(row.pid)]")

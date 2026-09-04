@@ -17,6 +17,8 @@ struct LiveTreeDiagnosticState: Codable, Equatable, Sendable {
     let promptPresent: Bool
     let renderingComplete: Bool
     let surfaceKind: String?
+    let presentation: String?
+    let passwordInputVisible: Bool
     let inspectionState: String
     let requestKind: String?
     let attribution: String?
@@ -35,6 +37,8 @@ struct LiveTreeDiagnostics {
         let promptPresent: Bool
         let renderingComplete: Bool
         let surfaceKind: String?
+        let presentation: String?
+        let passwordInputVisible: Bool
         let inspectionState: String
         let requestKind: String?
         let attribution: String?
@@ -78,6 +82,8 @@ struct LiveTreeDiagnostics {
                 promptPresent: false,
                 renderingComplete: true,
                 surfaceKind: nil,
+                presentation: nil,
+                passwordInputVisible: false,
                 inspectionState: "pending",
                 requestKind: nil,
                 attribution: nil,
@@ -100,6 +106,8 @@ struct LiveTreeDiagnostics {
                 promptPresent: promptPresent,
                 renderingComplete: true,
                 surfaceKind: nil,
+                presentation: nil,
+                passwordInputVisible: false,
                 inspectionState: "pending",
                 requestKind: nil,
                 attribution: nil,
@@ -112,6 +120,8 @@ struct LiveTreeDiagnostics {
     mutating func recordVisible(
         promptSequence: Int,
         surfaceKind: AuthenticationSurfaceKind,
+        presentation: String,
+        passwordInputVisible: Bool,
         snapshot: AuthenticationProcessSnapshot,
         renderedTable: RenderedProcessTable
     ) throws {
@@ -124,6 +134,8 @@ struct LiveTreeDiagnostics {
                 promptPresent: true,
                 renderingComplete: renderedTable.isComplete,
                 surfaceKind: surfaceKindName(surfaceKind),
+                presentation: presentation,
+                passwordInputVisible: passwordInputVisible,
                 inspectionState: inspectionStateName(snapshot.inspectionState),
                 requestKind: firstCandidate.map { requestKindName($0.requestKind) },
                 attribution: firstCandidate.map { attributionName($0.attribution) },
@@ -143,7 +155,7 @@ struct LiveTreeDiagnostics {
 
         writeSequence += 1
         let state = LiveTreeDiagnosticState(
-            schemaVersion: 3,
+            schemaVersion: 4,
             runID: runID,
             writeSequence: writeSequence,
             writtenAtUptime: now,
@@ -153,6 +165,8 @@ struct LiveTreeDiagnostics {
             promptPresent: payload.promptPresent,
             renderingComplete: payload.renderingComplete,
             surfaceKind: payload.surfaceKind,
+            presentation: payload.presentation,
+            passwordInputVisible: payload.passwordInputVisible,
             inspectionState: payload.inspectionState,
             requestKind: payload.requestKind,
             attribution: payload.attribution,

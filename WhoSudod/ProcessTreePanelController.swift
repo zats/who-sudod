@@ -22,63 +22,38 @@ struct VerifiedPAMPasswordRequest: Equatable, Sendable {
     }
 }
 
-enum ProcessPanelPlacement {
-    case authentication(frame: CGRect, visibleFrame: CGRect)
-    case standalone(anchorFrame: CGRect, visibleFrame: CGRect)
-
-    var materialCornerRadius: CGFloat {
-        switch self {
-        case .authentication:
-            AuthorizationPanelMetrics.envelopeCornerRadius
-        case .standalone:
-            ProcessPanelMetrics.regularWindowCornerRadius
-        }
-    }
+private struct AuthenticationPanelPlacement {
+    let frame: CGRect
+    let visibleFrame: CGRect
 
     func geometry(displayMode: ProcessDisplayMode) -> SidecarGeometry {
-        switch self {
-        case let .authentication(frame, visibleFrame):
-            WindowGeometry.sidecarFrame(
-                authenticationFrame: frame,
-                visibleFrame: visibleFrame,
-                displayMode: displayMode
-            )
-        case let .standalone(anchorFrame, visibleFrame):
-            WindowGeometry.standaloneSidecarFrame(
-                anchorFrame: anchorFrame,
-                visibleFrame: visibleFrame,
-                displayMode: displayMode
-            )
-        }
+        WindowGeometry.sidecarFrame(
+            authenticationFrame: frame,
+            visibleFrame: visibleFrame,
+            displayMode: displayMode
+        )
     }
 
     func transition(
         from source: SidecarGeometry,
         to destination: SidecarGeometry
     ) -> SidecarTransitionGeometry {
-        switch self {
-        case let .authentication(frame, _):
-            WindowGeometry.transition(
-                from: source,
-                to: destination,
-                authenticationFrame: frame
-            )
-        case .standalone:
-            WindowGeometry.standaloneTransition(
-                from: source,
-                to: destination
-            )
-        }
+        WindowGeometry.transition(
+            from: source,
+            to: destination,
+            authenticationFrame: frame
+        )
     }
 }
 
 @MainActor
 final class ProcessTreePanelController: NSWindowController {
     private let content: CompanionContentView
+    private let notch: ProcessNotchController
     private var displayMode: ProcessDisplayMode
     private var currentSnapshot: AuthenticationProcessSnapshot?
     private var currentSurfaceKind: AuthenticationSurfaceKind?
-    private var currentPlacement: ProcessPanelPlacement?
+    private var currentPlacement: AuthenticationPanelPlacement?
     private var currentSidecar: SidecarGeometry?
     private var currentAttachmentSide: SidecarSide?
     private var geometryTransitionGeneration = 0
@@ -87,8 +62,14 @@ final class ProcessTreePanelController: NSWindowController {
     private var currentPromptSequence = 0
     private var activePAMPasswordRequestID: UUID?
     private var passwordSubmissionHandler: (@MainActor (UUID, String) -> Void)?
-    private var useTerminalHandler: (@MainActor (UUID) -> Void)?
-    private(set) var isPresented = false
+    private let pamSetupActionProvider: @MainActor () -> PAMNotchAction?
+    private var sidecarIsPresented = false
+    var onNotchDismissRequest: (() -> Void)? {
+        didSet { notch.onDismissRequest = onNotchDismissRequest }
+    }
+    var isPresented: Bool { sidecarIsPresented || notch.isPresented }
+    var isNotchPresented: Bool { notch.isPresented }
+    var notchWindow: NSWindow? { notch.window }
 #if DEBUG
     private let logger = Logger(subsystem: "com.zats.WhoSudo", category: "LiveTreeDiagnostics")
     private var liveTreeDiagnostics = LiveTreeDiagnostics()
@@ -96,12 +77,20 @@ final class ProcessTreePanelController: NSWindowController {
 
     init(
         displayMode: ProcessDisplayMode = .simple,
-        displayModeRequestHandler: @escaping (ProcessDisplayMode) -> Void = { _ in }
+        displayModeRequestHandler: @escaping (ProcessDisplayMode) -> Void = { _ in },
+        pamSetupActionProvider: @escaping @MainActor () -> PAMNotchAction? = { nil },
+        pamSetupActionHandler: @escaping @MainActor (PAMSettingsAction) -> Void = { _ in }
     ) {
         self.displayMode = displayMode
+        self.pamSetupActionProvider = pamSetupActionProvider
         content = CompanionContentView(
             displayMode: displayMode,
             displayModeRequestHandler: displayModeRequestHandler
+        )
+        notch = ProcessNotchController(
+            displayMode: displayMode,
+            displayModeRequestHandler: displayModeRequestHandler,
+            pamActionRequestHandler: pamSetupActionHandler
         )
         let panel = PassivePanel(
             contentRect: NSRect(x: 0, y: 0, width: 520, height: 320),
@@ -110,11 +99,8 @@ final class ProcessTreePanelController: NSWindowController {
             defer: false
         )
         super.init(window: panel)
-        content.onPasswordSubmit = { [weak self] password in
+        notch.onPasswordSubmit = { [weak self] password in
             self?.submitPassword(password)
-        }
-        content.onUseTerminal = { [weak self] in
-            self?.useTerminal()
         }
         configure(panel)
         panel.contentView = content
@@ -136,46 +122,62 @@ final class ProcessTreePanelController: NSWindowController {
             snapshot: snapshot,
             promptSequence: promptSequence,
             surfaceKind: surfaceKind,
-            placement: .authentication(
+            placement: AuthenticationPanelPlacement(
                 frame: authenticationFrame,
                 visibleFrame: visibleFrame
             )
         )
     }
 
-    func showStandalone(
+    func showNotch(
         snapshot: AuthenticationProcessSnapshot,
         promptSequence: Int,
         anchorFrame: CGRect,
-        visibleFrame: CGRect
+        visibleFrame: CGRect,
+        allowsPAMSetupAction: Bool = true
     ) {
-        show(
-            snapshot: snapshot,
-            promptSequence: promptSequence,
-            surfaceKind: .terminalPassword,
-            placement: .standalone(
-                anchorFrame: anchorFrame,
-                visibleFrame: visibleFrame
-            )
+        guard let screen = NSScreen.screens.first(where: { $0.visibleFrame == visibleFrame })
+            ?? NSScreen.screens.max(by: {
+                $0.frame.intersection(anchorFrame).width * $0.frame.intersection(anchorFrame).height
+                    < $1.frame.intersection(anchorFrame).width * $1.frame.intersection(anchorFrame).height
+            }) else { return }
+        let animated = ProcessTableAnimationPolicy.animatesContentChange(
+            panelIsPresented: notch.isPresented,
+            currentPromptSequence: currentPromptSequence,
+            nextPromptSequence: promptSequence
         )
+        cancelGeometryTransition()
+        content.setHovered(false)
+        window?.orderOut(nil)
+        sidecarIsPresented = false
+        currentPlacement = nil
+        currentSnapshot = snapshot
+        currentPromptSequence = promptSequence
+        currentSurfaceKind = .terminalPassword
+        notch.show(
+            snapshot: snapshot,
+            screen: screen,
+            animated: animated,
+            pamAction: allowsPAMSetupAction && activePAMPasswordRequestID == nil
+                ? pamSetupActionProvider()
+                : nil
+        )
+#if DEBUG
+        recordVisibleLiveTree()
+#endif
     }
 
     /// Enables password input only for a request authenticated by the PAM IPC
     /// layer. This does not take keyboard focus from the calling terminal.
     func presentVerifiedPAMPasswordRequest(
         _ request: VerifiedPAMPasswordRequest,
-        onPassword: @escaping @MainActor (UUID, String) -> Void,
-        onUseTerminal: @escaping @MainActor (UUID) -> Void
+        onPassword: @escaping @MainActor (UUID, String) -> Void
     ) {
         let replacesRequest = activePAMPasswordRequestID != request.id
         activePAMPasswordRequestID = request.id
         passwordSubmissionHandler = onPassword
-        useTerminalHandler = onUseTerminal
 
-        content.presentPasswordEntry(clearExistingInput: replacesRequest)
-        if let panel = window as? PassivePanel {
-            panel.acceptsKeyInput = true
-        }
+        notch.presentPasswordEntry(clearExistingInput: replacesRequest)
     }
 
     func dismissVerifiedPAMPasswordRequest(_ requestID: UUID) {
@@ -190,32 +192,33 @@ final class ProcessTreePanelController: NSWindowController {
     }
 
     var isPAMPasswordEntryFocused: Bool {
-        activePAMPasswordRequestID != nil && window?.isKeyWindow == true
+        activePAMPasswordRequestID != nil && notch.isPasswordEntryFocused
     }
 
     private func show(
         snapshot: AuthenticationProcessSnapshot,
         promptSequence: Int,
         surfaceKind: AuthenticationSurfaceKind,
-        placement: ProcessPanelPlacement
+        placement: AuthenticationPanelPlacement
     ) {
         guard let window else {
             return
         }
 
+        endPAMPasswordPresentation()
+        notch.hide()
         let animatesTableChange = ProcessTableAnimationPolicy.animatesContentChange(
-            panelIsPresented: isPresented,
+            panelIsPresented: sidecarIsPresented,
             currentPromptSequence: currentPromptSequence,
             nextPromptSequence: promptSequence
         )
-        if snapshot != currentSnapshot {
+        if snapshot != currentSnapshot || !sidecarIsPresented {
             currentSnapshot = snapshot
             content.update(snapshot: snapshot, animated: animatesTableChange)
         }
         currentPromptSequence = promptSequence
         currentSurfaceKind = surfaceKind
         currentPlacement = placement
-        content.setMaterialCornerRadius(placement.materialCornerRadius)
 
         let target = placement.geometry(displayMode: displayMode)
         if let activeGeometryTransitionTarget {
@@ -226,9 +229,9 @@ final class ProcessTreePanelController: NSWindowController {
         } else {
             applyPanelGeometry(target)
         }
-        if !isPresented {
+        if !sidecarIsPresented {
             window.orderFrontRegardless()
-            isPresented = true
+            sidecarIsPresented = true
         }
 #if DEBUG
         if activeGeometryTransitionGeneration == nil, window.isVisible {
@@ -240,10 +243,12 @@ final class ProcessTreePanelController: NSWindowController {
 
     func hide(promptPresent: Bool, accessibilityTrusted: Bool) {
         cancelGeometryTransition()
+        content.setHovered(false)
         endPAMPasswordPresentation()
-        if isPresented {
+        notch.hide()
+        if sidecarIsPresented {
             window?.orderOut(nil)
-            isPresented = false
+            sidecarIsPresented = false
         }
 #if DEBUG
         do {
@@ -265,7 +270,8 @@ final class ProcessTreePanelController: NSWindowController {
         }
         displayMode = mode
         content.setDisplayMode(mode)
-        guard isPresented,
+        notch.setDisplayMode(mode)
+        guard sidecarIsPresented,
               let window,
               let currentPlacement else {
             return
@@ -328,26 +334,13 @@ final class ProcessTreePanelController: NSWindowController {
         handler(requestID, password)
     }
 
-    private func useTerminal() {
-        guard let requestID = activePAMPasswordRequestID,
-              let handler = useTerminalHandler else {
-            return
-        }
-        endPAMPasswordPresentation()
-        handler(requestID)
-    }
-
     private func endPAMPasswordPresentation() {
         guard activePAMPasswordRequestID != nil else {
             return
         }
-        content.dismissPasswordEntry()
+        notch.dismissPasswordEntry()
         activePAMPasswordRequestID = nil
         passwordSubmissionHandler = nil
-        useTerminalHandler = nil
-        if let panel = window as? PassivePanel {
-            panel.acceptsKeyInput = false
-        }
     }
 
     private func applyPanelGeometry(_ sidecar: SidecarGeometry) {
@@ -530,8 +523,10 @@ final class ProcessTreePanelController: NSWindowController {
             try liveTreeDiagnostics?.recordVisible(
                 promptSequence: currentPromptSequence,
                 surfaceKind: surfaceKind,
+                presentation: notch.isPresented ? "notch" : "dialog",
+                passwordInputVisible: notch.isPresented && notch.passwordInputVisible,
                 snapshot: snapshot,
-                renderedTable: content.renderedTable
+                renderedTable: notch.isPresented ? notch.renderedTable : content.renderedTable
             )
         } catch {
             logger.error("Could not write live tree state: \(error.localizedDescription, privacy: .public)")
@@ -542,37 +537,19 @@ final class ProcessTreePanelController: NSWindowController {
 }
 
 private final class PassivePanel: NSPanel {
-    var acceptsKeyInput = false {
-        didSet {
-            guard !acceptsKeyInput, isKeyWindow else {
-                return
-            }
-            makeFirstResponder(nil)
-            resignKey()
-        }
-    }
-
-    override var canBecomeKey: Bool { acceptsKeyInput }
+    override var canBecomeKey: Bool { false }
     override var canBecomeMain: Bool { false }
 }
 
 @MainActor
 final class CompanionContentView: NSView {
-    var onPasswordSubmit: ((String) -> Void)?
-    var onUseTerminal: (() -> Void)?
-
     private let processTable: ProcessTableView
     private let material = NSVisualEffectView()
     private let tint = PanelTintView()
-    private let body = HoverTrackingView()
-    private let modeControl = ProcessModeToggleControl()
-    private let passwordEntry = PAMPasswordEntryView()
-    private var materialSideConstraints: [NSLayoutConstraint] = []
-    private var bodySideConstraints: [NSLayoutConstraint] = []
+    private let modeControl: ProcessDisplayModeButton
     private var tableSideConstraints: [NSLayoutConstraint] = []
     private var modeControlSideConstraints: [NSLayoutConstraint] = []
-    private var tableBottomConstraint: NSLayoutConstraint?
-    private var tablePasswordBottomConstraint: NSLayoutConstraint?
+    private var hoverTrackingArea: NSTrackingArea?
     private var attachmentSide: SidecarSide?
     private var reservedDialogWidth: CGFloat = 0
 
@@ -582,11 +559,15 @@ final class CompanionContentView: NSView {
         displayModeRequestHandler: @escaping (ProcessDisplayMode) -> Void = { _ in }
     ) {
         processTable = ProcessTableView(frame: .zero, displayMode: displayMode)
+        modeControl = ProcessDisplayModeButton(
+            displayMode: displayMode,
+            presentation: .panelCorner
+        )
         super.init(frame: frameRect)
         modeControl.onModeRequest = { mode in
             displayModeRequestHandler(mode)
         }
-        modeControl.setDisplayMode(displayMode)
+        modeControl.setAccessibilityIdentifier("who-sudod.process-tree.mode-toggle")
         configure()
     }
 
@@ -607,63 +588,25 @@ final class CompanionContentView: NSView {
         modeControl.setDisplayMode(mode)
     }
 
-    func presentPasswordEntry(clearExistingInput: Bool) {
-        if clearExistingInput {
-            passwordEntry.clearPassword()
-        }
-        guard passwordEntry.isHidden else {
-            return
-        }
-        tableBottomConstraint?.isActive = false
-        tablePasswordBottomConstraint?.isActive = true
-        passwordEntry.isHidden = false
-    }
-
-    func dismissPasswordEntry() {
-        passwordEntry.clearPassword()
-        guard !passwordEntry.isHidden else {
-            return
-        }
-        passwordEntry.isHidden = true
-        tablePasswordBottomConstraint?.isActive = false
-        tableBottomConstraint?.isActive = true
+    func setHovered(_ isHovered: Bool) {
+        modeControl.setHovered(isHovered)
     }
 
     var renderedTable: RenderedProcessTable {
         processTable.renderedTable()
     }
 
-    func setMaterialCornerRadius(_ cornerRadius: CGFloat) {
-        material.layer?.cornerRadius = cornerRadius
-    }
-
     func setAttachmentSide(_ side: SidecarSide, reservedDialogWidth: CGFloat) {
         guard side != attachmentSide || reservedDialogWidth != self.reservedDialogWidth else {
             return
         }
-        NSLayoutConstraint.deactivate(materialSideConstraints)
-        NSLayoutConstraint.deactivate(bodySideConstraints)
         NSLayoutConstraint.deactivate(tableSideConstraints)
         NSLayoutConstraint.deactivate(modeControlSideConstraints)
         if side == .right {
-            materialSideConstraints = [
-                material.leadingAnchor.constraint(equalTo: leadingAnchor),
-                material.trailingAnchor.constraint(
-                    equalTo: trailingAnchor,
-                    constant: -ProcessPanelMetrics.modeControlWindowMargin
-                )
-            ]
-            bodySideConstraints = [
-                body.leadingAnchor.constraint(
-                    equalTo: material.leadingAnchor,
-                    constant: reservedDialogWidth
-                ),
-                body.trailingAnchor.constraint(equalTo: trailingAnchor)
-            ]
             tableSideConstraints = [
                 processTable.leadingAnchor.constraint(
-                    equalTo: body.leadingAnchor,
-                    constant: ProcessPanelMetrics.tableHorizontalInset
+                    equalTo: material.leadingAnchor,
+                    constant: reservedDialogWidth + ProcessPanelMetrics.tableHorizontalInset
                 ),
                 processTable.trailingAnchor.constraint(
                     equalTo: material.trailingAnchor,
@@ -671,42 +614,31 @@ final class CompanionContentView: NSView {
                 )
             ]
             modeControlSideConstraints = [
-                modeControl.centerXAnchor.constraint(equalTo: material.trailingAnchor)
+                modeControl.trailingAnchor.constraint(
+                    equalTo: material.trailingAnchor,
+                    constant: -ProcessPanelMetrics.dialogModeButtonInset
+                )
             ]
         } else {
-            materialSideConstraints = [
-                material.leadingAnchor.constraint(
-                    equalTo: leadingAnchor,
-                    constant: ProcessPanelMetrics.modeControlWindowMargin
-                ),
-                material.trailingAnchor.constraint(equalTo: trailingAnchor)
-            ]
-            bodySideConstraints = [
-                body.leadingAnchor.constraint(equalTo: leadingAnchor),
-                body.trailingAnchor.constraint(
-                    equalTo: material.trailingAnchor,
-                    constant: -reservedDialogWidth
-                )
-            ]
             tableSideConstraints = [
                 processTable.leadingAnchor.constraint(
                     equalTo: material.leadingAnchor,
                     constant: ProcessPanelMetrics.tableHorizontalInset
                 ),
                 processTable.trailingAnchor.constraint(
-                    equalTo: body.trailingAnchor,
-                    constant: -ProcessPanelMetrics.tableHorizontalInset
+                    equalTo: material.trailingAnchor,
+                    constant: -reservedDialogWidth - ProcessPanelMetrics.tableHorizontalInset
                 )
             ]
             modeControlSideConstraints = [
-                modeControl.centerXAnchor.constraint(equalTo: material.leadingAnchor)
+                modeControl.leadingAnchor.constraint(
+                    equalTo: material.leadingAnchor,
+                    constant: ProcessPanelMetrics.dialogModeButtonInset
+                )
             ]
         }
-        NSLayoutConstraint.activate(materialSideConstraints)
-        NSLayoutConstraint.activate(bodySideConstraints)
         NSLayoutConstraint.activate(tableSideConstraints)
         NSLayoutConstraint.activate(modeControlSideConstraints)
-        modeControl.setAttachmentSide(side)
         attachmentSide = side
         self.reservedDialogWidth = reservedDialogWidth
     }
@@ -733,35 +665,12 @@ final class CompanionContentView: NSView {
         processTable.translatesAutoresizingMaskIntoConstraints = false
         material.addSubview(processTable)
 
-        body.translatesAutoresizingMaskIntoConstraints = false
-        body.onHoverChange = { [weak modeControl] isHovered in
-            modeControl?.setHovered(isHovered)
-        }
-        addSubview(body)
-
         modeControl.translatesAutoresizingMaskIntoConstraints = false
-        body.addSubview(modeControl)
-        passwordEntry.translatesAutoresizingMaskIntoConstraints = false
-        passwordEntry.isHidden = true
-        passwordEntry.onSubmit = { [weak self] password in
-            self?.onPasswordSubmit?(password)
-        }
-        passwordEntry.onUseTerminal = { [weak self] in
-            self?.onUseTerminal?()
-        }
-        body.addSubview(passwordEntry)
-
-        let tableBottomConstraint = processTable.bottomAnchor.constraint(
-            equalTo: body.bottomAnchor
-        )
-        let tablePasswordBottomConstraint = processTable.bottomAnchor.constraint(
-            equalTo: passwordEntry.topAnchor,
-            constant: -8
-        )
-        self.tableBottomConstraint = tableBottomConstraint
-        self.tablePasswordBottomConstraint = tablePasswordBottomConstraint
+        material.addSubview(modeControl)
         NSLayoutConstraint.activate([
             material.topAnchor.constraint(equalTo: topAnchor),
+            material.leadingAnchor.constraint(equalTo: leadingAnchor),
+            material.trailingAnchor.constraint(equalTo: trailingAnchor),
             material.bottomAnchor.constraint(equalTo: bottomAnchor),
 
             tint.topAnchor.constraint(equalTo: material.topAnchor),
@@ -769,30 +678,41 @@ final class CompanionContentView: NSView {
             tint.trailingAnchor.constraint(equalTo: material.trailingAnchor),
             tint.bottomAnchor.constraint(equalTo: material.bottomAnchor),
 
-            body.topAnchor.constraint(equalTo: material.topAnchor),
-            body.bottomAnchor.constraint(equalTo: material.bottomAnchor),
+            processTable.topAnchor.constraint(equalTo: material.topAnchor),
+            processTable.bottomAnchor.constraint(equalTo: material.bottomAnchor),
 
-            processTable.topAnchor.constraint(equalTo: body.topAnchor),
-            tableBottomConstraint,
-
-            passwordEntry.leadingAnchor.constraint(equalTo: processTable.leadingAnchor),
-            passwordEntry.trailingAnchor.constraint(equalTo: processTable.trailingAnchor),
-            passwordEntry.bottomAnchor.constraint(
-                equalTo: body.bottomAnchor,
-                constant: -ProcessPanelMetrics.tableHorizontalInset
-            ),
-            passwordEntry.heightAnchor.constraint(equalToConstant: 86),
-
-            modeControl.centerYAnchor.constraint(equalTo: body.centerYAnchor),
-            modeControl.widthAnchor.constraint(
-                equalToConstant: ProcessPanelMetrics.modeControlDiameter
-            ),
-            modeControl.heightAnchor.constraint(
-                equalToConstant: ProcessPanelMetrics.modeControlDiameter
+            modeControl.topAnchor.constraint(
+                equalTo: processTable.topAnchor,
+                constant: ProcessPanelMetrics.dialogModeButtonInset
             )
         ])
         setAttachmentSide(.right, reservedDialogWidth: 0)
         updateAppearanceColors()
+    }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let hoverTrackingArea {
+            removeTrackingArea(hoverTrackingArea)
+        }
+        let trackingArea = NSTrackingArea(
+            rect: .zero,
+            options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect],
+            owner: self,
+            userInfo: nil
+        )
+        addTrackingArea(trackingArea)
+        hoverTrackingArea = trackingArea
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        super.mouseEntered(with: event)
+        setHovered(true)
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        super.mouseExited(with: event)
+        setHovered(false)
     }
 
     override func viewDidChangeEffectiveAppearance() {
@@ -804,127 +724,6 @@ final class CompanionContentView: NSView {
         effectiveAppearance.performAsCurrentDrawingAppearance { [material] in
             material.layer?.borderColor = NSColor.separatorColor
                 .withAlphaComponent(0.28)
-                .cgColor
-        }
-    }
-}
-
-@MainActor
-final class PAMPasswordEntryView: NSVisualEffectView {
-    var onSubmit: ((String) -> Void)?
-    var onUseTerminal: (() -> Void)?
-
-    private let passwordField = NSSecureTextField()
-    private let submitButton = NSButton()
-    private let useTerminalButton = NSButton()
-
-    override init(frame frameRect: NSRect) {
-        super.init(frame: frameRect)
-        configure()
-    }
-
-    @available(*, unavailable)
-    required init?(coder: NSCoder) {
-        fatalError("init(coder:) has not been implemented")
-    }
-
-    func clearPassword() {
-        currentPasswordEditor?.string = ""
-        passwordField.abortEditing()
-        passwordField.stringValue = ""
-    }
-
-    private var currentPasswordEditor: NSText? {
-        passwordField.currentEditor()
-    }
-
-    private func configure() {
-        material = .popover
-        blendingMode = .withinWindow
-        state = .active
-        wantsLayer = true
-        layer?.cornerRadius = 11
-        layer?.cornerCurve = .continuous
-        layer?.masksToBounds = true
-        layer?.borderWidth = 0.5
-        setAccessibilityIdentifier("who-sudod.pam-password-entry")
-
-        passwordField.translatesAutoresizingMaskIntoConstraints = false
-        passwordField.placeholderString = "Password"
-        passwordField.usesSingleLineMode = true
-        passwordField.target = self
-        passwordField.action = #selector(submitPassword)
-        passwordField.setAccessibilityIdentifier("who-sudod.pam-password-field")
-        addSubview(passwordField)
-
-        submitButton.translatesAutoresizingMaskIntoConstraints = false
-        submitButton.title = "Submit"
-        submitButton.bezelStyle = .rounded
-        submitButton.keyEquivalent = "\r"
-        submitButton.target = self
-        submitButton.action = #selector(submitPassword)
-        submitButton.setAccessibilityIdentifier("who-sudod.pam-password-submit")
-        addSubview(submitButton)
-
-        useTerminalButton.translatesAutoresizingMaskIntoConstraints = false
-        useTerminalButton.title = "Use Terminal"
-        useTerminalButton.bezelStyle = .rounded
-        useTerminalButton.target = self
-        useTerminalButton.action = #selector(useTerminal)
-        useTerminalButton.setAccessibilityIdentifier("who-sudod.pam-use-terminal")
-        addSubview(useTerminalButton)
-
-        let submitMinimumWidth = submitButton.widthAnchor.constraint(
-            greaterThanOrEqualToConstant: 66
-        )
-        submitMinimumWidth.priority = .defaultHigh
-        NSLayoutConstraint.activate([
-            passwordField.topAnchor.constraint(equalTo: topAnchor, constant: 9),
-            passwordField.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 9),
-            passwordField.heightAnchor.constraint(equalToConstant: 28),
-
-            submitButton.leadingAnchor.constraint(
-                equalTo: passwordField.trailingAnchor,
-                constant: 8
-            ),
-            submitButton.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -9),
-            submitButton.centerYAnchor.constraint(equalTo: passwordField.centerYAnchor),
-            submitMinimumWidth,
-
-            useTerminalButton.topAnchor.constraint(
-                equalTo: passwordField.bottomAnchor,
-                constant: 7
-            ),
-            useTerminalButton.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 9),
-            useTerminalButton.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -9),
-            useTerminalButton.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -9)
-        ])
-        updateAppearanceColors()
-    }
-
-    @objc
-    private func submitPassword() {
-        passwordField.validateEditing()
-        let password = passwordField.stringValue
-        clearPassword()
-        onSubmit?(password)
-    }
-
-    @objc
-    private func useTerminal() {
-        clearPassword()
-        onUseTerminal?()
-    }
-
-    override func viewDidChangeEffectiveAppearance() {
-        super.viewDidChangeEffectiveAppearance()
-        updateAppearanceColors()
-    }
-
-    private func updateAppearanceColors() {
-        effectiveAppearance.performAsCurrentDrawingAppearance { [layer] in
-            layer?.borderColor = NSColor.separatorColor
-                .withAlphaComponent(0.35)
                 .cgColor
         }
     }
@@ -961,84 +760,43 @@ final class PanelTintView: NSView {
 }
 
 @MainActor
-final class HoverTrackingView: NSView {
-    var onHoverChange: ((Bool) -> Void)?
-    private var hoverTrackingArea: NSTrackingArea?
-
-    override func updateTrackingAreas() {
-        super.updateTrackingAreas()
-        if let hoverTrackingArea {
-            removeTrackingArea(hoverTrackingArea)
-        }
-        let area = NSTrackingArea(
-            rect: .zero,
-            options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect],
-            owner: self
-        )
-        addTrackingArea(area)
-        hoverTrackingArea = area
+final class ProcessDisplayModeButton: NSButton {
+    enum Presentation: Equatable {
+        case plain
+        case panelCorner
     }
 
-    override func mouseEntered(with event: NSEvent) {
-        onHoverChange?(true)
-    }
-
-    override func mouseExited(with event: NSEvent) {
-        onHoverChange?(false)
-    }
-
-    override func hitTest(_ point: NSPoint) -> NSView? {
-        guard let superview else {
-            return nil
-        }
-        let localPoint = convert(point, from: superview)
-        for subview in subviews.reversed() where !subview.isHidden {
-            if let hitView = subview.hitTest(localPoint) {
-                return hitView
-            }
-        }
-        return nil
-    }
-}
-
-enum ProcessModeControlDirection: Equatable {
-    case left
-    case right
-
-    var systemSymbolName: String {
-        switch self {
-        case .left:
-            "arrowtriangle.left.fill"
-        case .right:
-            "arrowtriangle.right.fill"
-        }
-    }
-}
-
-@MainActor
-final class ProcessModeToggleControl: NSButton {
     var onModeRequest: ((ProcessDisplayMode) -> Void)?
-    private(set) var direction: ProcessModeControlDirection = .right
-    private(set) var symbolImage: NSImage?
-    private var displayMode: ProcessDisplayMode = .simple
-    private var attachmentSide: SidecarSide = .right
-    private var isHovered = false
+    private(set) var systemSymbolName = ""
+    private var displayMode: ProcessDisplayMode
+    private let presentation: Presentation
+    private var pointerIsInside = false
 
-    override init(frame frameRect: NSRect) {
-        super.init(frame: frameRect)
+    init(
+        displayMode: ProcessDisplayMode,
+        presentation: Presentation = .plain
+    ) {
+        self.displayMode = displayMode
+        self.presentation = presentation
+        super.init(frame: .zero)
         title = ""
-        isBordered = false
+        bezelStyle = .inline
+        if presentation == .panelCorner {
+            isBordered = false
+            borderShape = .circle
+            wantsLayer = true
+            layer?.cornerRadius = ProcessPanelMetrics.dialogModeButtonDiameter / 2
+            layer?.cornerCurve = .continuous
+            layer?.masksToBounds = true
+            layer?.borderWidth = 0
+        }
+        controlSize = .small
+        imagePosition = .imageOnly
         focusRingType = .none
-        setButtonType(.momentaryPushIn)
-        wantsLayer = true
-        layer?.cornerRadius = ProcessPanelMetrics.modeControlDiameter / 2
-        layer?.cornerCurve = .continuous
-        layer?.masksToBounds = true
-        layer?.borderWidth = 0
-        setAccessibilityIdentifier("who-sudod.process-tree.mode-toggle")
         target = self
         action = #selector(toggleMode)
         updatePresentation()
+        updateVisibility()
         updateAppearanceColors()
     }
 
@@ -1052,42 +810,28 @@ final class ProcessModeToggleControl: NSButton {
     }
 
     override var alignmentRectInsets: NSEdgeInsets {
-        NSEdgeInsets(top: 0, left: 0, bottom: 0, right: 0)
+        presentation == .panelCorner
+            ? NSEdgeInsets(top: 0, left: 0, bottom: 0, right: 0)
+            : super.alignmentRectInsets
     }
 
-    override func viewDidChangeEffectiveAppearance() {
-        super.viewDidChangeEffectiveAppearance()
-        updatePresentation()
-        updateAppearanceColors()
+    override var intrinsicContentSize: NSSize {
+        let size = presentation == .panelCorner
+            ? ProcessPanelMetrics.dialogModeButtonDiameter
+            : ProcessPanelMetrics.modeButtonHitSize
+        return NSSize(
+            width: size,
+            height: size
+        )
     }
 
-    override func draw(_ dirtyRect: NSRect) {
-        super.draw(dirtyRect)
-        effectiveAppearance.performAsCurrentDrawingAppearance { [self] in
-            let lineWidth = 1 / (window?.backingScaleFactor ?? 2)
-            let radius = min(bounds.width, bounds.height) / 2 - lineWidth / 2
-            let stroke = NSBezierPath()
-            stroke.lineWidth = lineWidth
-            stroke.lineCapStyle = .butt
-            stroke.appendArc(
-                withCenter: NSPoint(x: bounds.midX, y: bounds.midY),
-                radius: radius,
-                startAngle: outerStrokeAngles.lowerBound,
-                endAngle: outerStrokeAngles.upperBound,
-                clockwise: false
-            )
-            NSColor.separatorColor.withAlphaComponent(0.28).setStroke()
-            stroke.stroke()
-
-            symbolImage?.draw(
-                in: symbolDrawingRect,
-                from: .zero,
-                operation: .sourceOver,
-                fraction: isEnabled ? 1 : 0.4,
-                respectFlipped: true,
-                hints: nil
-            )
+    func setHovered(_ isHovered: Bool) {
+        guard presentation == .panelCorner,
+              pointerIsInside != isHovered else {
+            return
         }
+        pointerIsInside = isHovered
+        updateVisibility()
     }
 
     func setDisplayMode(_ displayMode: ProcessDisplayMode) {
@@ -1096,18 +840,6 @@ final class ProcessModeToggleControl: NSButton {
         }
         self.displayMode = displayMode
         updatePresentation()
-    }
-
-    func setAttachmentSide(_ attachmentSide: SidecarSide) {
-        guard attachmentSide != self.attachmentSide else {
-            return
-        }
-        self.attachmentSide = attachmentSide
-        updatePresentation()
-    }
-
-    func setHovered(_ isHovered: Bool) {
-        self.isHovered = isHovered
         updateVisibility()
     }
 
@@ -1118,44 +850,6 @@ final class ProcessModeToggleControl: NSButton {
 
     private var requestedMode: ProcessDisplayMode {
         displayMode == .simple ? .fullTree : .simple
-    }
-
-    var outerStrokeAngles: ClosedRange<CGFloat> {
-        switch attachmentSide {
-        case .left:
-            90 ... 270
-        case .right:
-            -90 ... 90
-        }
-    }
-
-    var symbolDrawingRect: NSRect {
-        guard let symbolImage,
-              symbolImage.size.width > 0,
-              symbolImage.size.height > 0 else {
-            return .zero
-        }
-        let maximumDimension: CGFloat = 10
-        let scale = min(
-            maximumDimension / symbolImage.size.width,
-            maximumDimension / symbolImage.size.height
-        )
-        let size = NSSize(
-            width: symbolImage.size.width * scale,
-            height: symbolImage.size.height * scale
-        )
-        let horizontalOffset: CGFloat = switch direction {
-        case .left:
-            -ProcessPanelMetrics.modeControlSymbolOpticalOffset
-        case .right:
-            ProcessPanelMetrics.modeControlSymbolOpticalOffset
-        }
-        return NSRect(
-            x: bounds.midX - size.width / 2 + horizontalOffset,
-            y: bounds.midY - size.height / 2,
-            width: size.width,
-            height: size.height
-        )
     }
 
     private func updatePresentation() {
@@ -1173,7 +867,7 @@ final class ProcessModeToggleControl: NSButton {
             )
         } else {
             label = String(
-                localized: "Collapse",
+                localized: "Compact",
                 comment: "Tooltip for the control that collapses the process table"
             )
             help = String(
@@ -1182,43 +876,35 @@ final class ProcessModeToggleControl: NSButton {
             )
         }
 
-        direction = switch (displayMode, attachmentSide) {
-        case (.simple, .right), (.fullTree, .left):
-            .right
-        case (.simple, .left), (.fullTree, .right):
-            .left
-        }
-        let sizeConfiguration = NSImage.SymbolConfiguration(
-            pointSize: 10,
-            weight: .semibold
-        )
-        let colorConfiguration = NSImage.SymbolConfiguration(
-            hierarchicalColor: .secondaryLabelColor
-        )
-        symbolImage = NSImage(
-            systemSymbolName: direction.systemSymbolName,
+        systemSymbolName = isExpanding
+            ? "arrow.up.left.and.arrow.down.right"
+            : "arrow.down.right.and.arrow.up.left"
+        image = NSImage(
+            systemSymbolName: systemSymbolName,
             accessibilityDescription: label
-        )?.withSymbolConfiguration(
-            sizeConfiguration.applying(colorConfiguration)
         )
         toolTip = label
         setAccessibilityLabel(label)
         setAccessibilityHelp(help)
-        updateVisibility()
-        needsDisplay = true
     }
 
     private func updateVisibility() {
-        let isVisible = displayMode == .fullTree || isHovered
-        isHidden = false
-        alphaValue = isVisible ? 1 : 0
-        setAccessibilityHidden(!isVisible)
+        alphaValue = presentation == .panelCorner
+            && displayMode == .simple
+            && !pointerIsInside
+            ? 0
+            : 1
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        updateAppearanceColors()
     }
 
     private func updateAppearanceColors() {
+        guard presentation == .panelCorner else { return }
         effectiveAppearance.performAsCurrentDrawingAppearance { [layer] in
             layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
         }
-        needsDisplay = true
     }
 }

@@ -48,7 +48,9 @@ final class AuthenticationPromptSessionStoreTests: XCTestCase {
     func testTransfersHistoryAcrossCoreGraphicsAndAccessibilityRepresentations() {
         var store = AuthenticationPromptSessionStore()
         let coreGraphics = window(id: 44)
-        let accessibility = window(identity: .accessibility(processID: 321))
+        let accessibility = window(
+            identity: .accessibility(processID: 321, elementIdentifier: 17)
+        )
         let date = Date(timeIntervalSince1970: 100)
 
         let original = store.activate(window: coreGraphics, at: date)
@@ -69,7 +71,9 @@ final class AuthenticationPromptSessionStoreTests: XCTestCase {
     func testTransferDoesNotOverwriteExistingDestinationHistory() {
         var store = AuthenticationPromptSessionStore()
         let coreGraphics = window(id: 44)
-        let accessibility = window(identity: .accessibility(processID: 321))
+        let accessibility = window(
+            identity: .accessibility(processID: 321, elementIdentifier: 17)
+        )
         store.update(window: coreGraphics, processSnapshot: .empty, at: .distantPast)
         let destination = store.activate(window: accessibility, at: .distantFuture)
         store.update(
@@ -88,6 +92,39 @@ final class AuthenticationPromptSessionStoreTests: XCTestCase {
         XCTAssertEqual(transferred.processSnapshot, .unavailable)
         XCTAssertEqual(store.session(for: coreGraphics)?.processSnapshot, .empty)
         XCTAssertEqual(store.session(for: accessibility)?.processSnapshot, .unavailable)
+    }
+
+    func testTransferReplacesNewlyObservedPendingDestination() {
+        var store = AuthenticationPromptSessionStore()
+        let accessibility = window(
+            identity: .accessibility(processID: 321, elementIdentifier: 17)
+        )
+        let coreGraphics = window(id: 44)
+        let firstSeenAt = Date(timeIntervalSince1970: 100)
+        let observationDate = firstSeenAt.addingTimeInterval(1)
+        let source = store.activate(window: accessibility, at: firstSeenAt)
+        store.update(
+            window: accessibility,
+            processSnapshot: .empty,
+            at: firstSeenAt
+        )
+        store.observeVisibleCoreGraphicsWindows(
+            [coreGraphics],
+            at: observationDate
+        )
+
+        let transferred = store.transfer(
+            from: accessibility,
+            to: coreGraphics,
+            at: observationDate
+        )
+
+        XCTAssertEqual(store.sessions.count, 1)
+        XCTAssertNil(store.session(for: accessibility))
+        XCTAssertEqual(transferred.promptSequence, source.promptSequence)
+        XCTAssertEqual(transferred.processSnapshot, .empty)
+        XCTAssertTrue(transferred.hasAttributedSnapshot)
+        XCTAssertEqual(store.session(for: coreGraphics), transferred)
     }
 
     func testDoesNotRestoreReusedWindowIDFromAnotherPresenterProcess() {
@@ -136,9 +173,34 @@ final class AuthenticationPromptSessionStoreTests: XCTestCase {
         XCTAssertNotNil(store.session(for: window))
     }
 
+    func testPreservesCoveredCoreGraphicsSessionWhileItIsNotVisible() throws {
+        var store = AuthenticationPromptSessionStore()
+        let covered = window(id: 44)
+        let firstSeenAt = Date(timeIntervalSince1970: 100)
+        let original = store.activate(window: covered, at: firstSeenAt)
+        store.update(window: covered, processSnapshot: .empty, at: firstSeenAt)
+        let key = AuthenticationPromptSessionKey(window: covered)
+
+        for offset in 1...4 {
+            store.observeVisibleCoreGraphicsWindows(
+                [],
+                at: firstSeenAt.addingTimeInterval(TimeInterval(offset)),
+                preserving: [key]
+            )
+        }
+
+        let restored = try XCTUnwrap(store.session(for: covered))
+        XCTAssertEqual(restored.promptSequence, original.promptSequence)
+        XCTAssertEqual(restored.firstSeenAt, firstSeenAt)
+        XCTAssertEqual(restored.processSnapshot, .empty)
+        XCTAssertEqual(restored.consecutiveMissingObservations, 0)
+    }
+
     func testKeepsBackgroundAccessibilitySessionAndRemovesItAfterWindowCloses() {
         var store = AuthenticationPromptSessionStore()
-        let window = window(identity: .accessibility(processID: 321))
+        let window = window(
+            identity: .accessibility(processID: 321, elementIdentifier: 17)
+        )
         store.update(window: window, processSnapshot: .empty, at: .distantPast)
 
         XCTAssertEqual(store.accessibilityWindowIdentities, [window.identity])
@@ -149,6 +211,52 @@ final class AuthenticationPromptSessionStoreTests: XCTestCase {
 
         store.observeVisibleAccessibilityWindows([], at: Date(timeIntervalSince1970: 4))
         XCTAssertNil(store.session(for: window))
+    }
+
+    func testPreservesCoveredAccessibilitySessionWhileItIsNotVisible() throws {
+        var store = AuthenticationPromptSessionStore()
+        let covered = window(
+            identity: .accessibility(processID: 321, elementIdentifier: 17)
+        )
+        let firstSeenAt = Date(timeIntervalSince1970: 100)
+        let original = store.activate(window: covered, at: firstSeenAt)
+        store.update(window: covered, processSnapshot: .unavailable, at: firstSeenAt)
+        let key = AuthenticationPromptSessionKey(window: covered)
+
+        for offset in 1...4 {
+            store.observeVisibleAccessibilityWindows(
+                [],
+                at: firstSeenAt.addingTimeInterval(TimeInterval(offset)),
+                preserving: [key]
+            )
+        }
+
+        let restored = try XCTUnwrap(store.session(for: covered))
+        XCTAssertEqual(restored.promptSequence, original.promptSequence)
+        XCTAssertEqual(restored.firstSeenAt, firstSeenAt)
+        XCTAssertEqual(restored.processSnapshot, .unavailable)
+        XCTAssertEqual(restored.consecutiveMissingObservations, 0)
+    }
+
+    func testStoresSeparateAccessibilityWindowsFromSamePresenter() {
+        var store = AuthenticationPromptSessionStore()
+        let first = window(
+            identity: .accessibility(processID: 321, elementIdentifier: 17)
+        )
+        let second = window(
+            identity: .accessibility(processID: 321, elementIdentifier: 18)
+        )
+
+        let firstSession = store.activate(window: first, at: .distantPast)
+        let secondSession = store.activate(window: second, at: .distantFuture)
+
+        XCTAssertNotEqual(firstSession.promptSequence, secondSession.promptSequence)
+        XCTAssertNotNil(store.session(for: first))
+        XCTAssertNotNil(store.session(for: second))
+        XCTAssertEqual(
+            Set(store.accessibilityWindowIdentities),
+            Set([first.identity, second.identity])
+        )
     }
 
     private func window(

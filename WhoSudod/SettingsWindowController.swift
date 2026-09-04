@@ -7,6 +7,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
 
     private let model: SettingsModel
     private let launchAtLogin: LaunchAtLoginController
+    private let accessibilityPermission: AccessibilityPermissionController
     private let ignoredApplicationsViewController: IgnoredApplicationsSettingsViewController
     private let didClose: () -> Void
 
@@ -14,6 +15,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         ignoredApplications: IgnoredApplicationsStore,
         pamIntegration: PAMIntegrationController,
         launchAtLogin: LaunchAtLoginController,
+        accessibilityPermission: AccessibilityPermissionController,
         pamConversationError: String?,
         didClose: @escaping () -> Void
     ) {
@@ -25,6 +27,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
             IgnoredApplicationsSettingsViewController(store: ignoredApplications)
         self.model = model
         self.launchAtLogin = launchAtLogin
+        self.accessibilityPermission = accessibilityPermission
         self.ignoredApplicationsViewController = ignoredApplicationsViewController
         self.didClose = didClose
 
@@ -32,6 +35,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
             rootView: SettingsView(
                 model: model,
                 launchAtLogin: launchAtLogin,
+                accessibilityPermission: accessibilityPermission,
                 ignoredApplicationsViewController: ignoredApplicationsViewController
             )
         )
@@ -72,6 +76,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     func present() {
         model.refreshPAMIntegration()
         launchAtLogin.refresh(preservingOperationError: true)
+        accessibilityPermission.refresh()
         ignoredApplicationsViewController.reload()
         showWindow(nil)
         window?.makeKeyAndOrderFront(nil)
@@ -81,6 +86,11 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
                 self?.ignoredApplicationsViewController.focusApplicationList()
             }
         }
+    }
+
+    func presentPAMAction(_ action: PAMSettingsAction) {
+        model.requestPAMAction(action)
+        present()
     }
 
     func updatePAMConversationError(_ error: String?) {
@@ -94,5 +104,6 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
     func windowDidBecomeKey(_ notification: Notification) {
         model.refreshPAMIntegration()
         launchAtLogin.refresh(preservingOperationError: true)
+        accessibilityPermission.refresh()
     }
 }

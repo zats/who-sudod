@@ -1,11 +1,11 @@
 import AppKit
-import ApplicationServices
 import Permiso
 import os
 
 enum ApplicationLaunchContext {
     static func shouldStartMonitor(environment: [String: String]) -> Bool {
         environment["XCTestConfigurationFilePath"] == nil
+            && environment["XCODE_RUNNING_FOR_PREVIEWS"] != "1"
     }
 }
 
@@ -24,6 +24,12 @@ private struct AppDelegateDependencies {
     let ignoredApplications = IgnoredApplicationsStore()
     let pamIntegration = PAMIntegrationController()
     let launchAtLogin = LaunchAtLoginController()
+    let accessibilityPermission = AccessibilityPermissionController(
+        isTrusted: { AccessibilityFocusReader.isTrusted },
+        requestHandler: {
+            PermisoAssistant.shared.present(panel: .accessibility)
+        }
+    )
 }
 
 @main
@@ -56,11 +62,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var launchAtLogin: LaunchAtLoginController {
         dependencies.launchAtLogin
     }
+    private var accessibilityPermission: AccessibilityPermissionController {
+        dependencies.accessibilityPermission
+    }
     private var monitor: AuthorizationPromptMonitor?
     private var pamConversationServer: PAMConversationServer?
     private var pamConversationError: String?
     private var statusItem: NSStatusItem?
-    private var accessMenuItem: NSMenuItem?
     private var settingsWindowController: SettingsWindowController?
     private var settingsKeyboardMonitor: Any?
     private var displayMode = ProcessDisplayMode.initial()
@@ -88,17 +96,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             displayModeRequestHandler: { [weak self] mode in
                 self?.setDisplayMode(mode)
             },
+            pamSetupActionProvider: { [weak self] in
+                guard let self,
+                      pamIntegration.hasCompletedRefresh,
+                      pamConversationError == nil else {
+                    return nil
+                }
+                return PAMSettingsPresentation(
+                    snapshot: pamIntegration.snapshot,
+                    conversationError: nil
+                ).notchAction
+            },
+            pamSetupActionHandler: { [weak self] action in
+                self?.presentSettings(pamAction: action)
+            },
             statusHandler: { [weak self] status in
                 self?.updateStatus(status)
             }
         )
         self.monitor = monitor
         startPAMConversationServer()
+        pamIntegration.refresh()
         monitor.start()
 
-        if !AccessibilityFocusReader.isTrusted {
+        accessibilityPermission.refresh()
+        if !accessibilityPermission.isGranted {
             DispatchQueue.main.async { [weak self] in
-                self?.presentAccessibilityAssistant()
+                self?.accessibilityPermission.requestAccess()
             }
         }
     }
@@ -323,23 +347,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         item.button?.image = statusImage
         item.button?.toolTip = "Who Sudo'd"
 
-        let statusMenu = makeStatusMenu()
-        item.menu = statusMenu.menu
+        item.menu = makeStatusMenu()
         statusItem = item
-        accessMenuItem = statusMenu.accessItem
     }
 
-    func makeStatusMenu() -> (menu: NSMenu, accessItem: NSMenuItem) {
+    func makeStatusMenu() -> NSMenu {
         let menu = NSMenu()
-        let access = NSMenuItem(
-            title: "Request Accessibility Access…",
-            action: #selector(requestAccessibilityAccess),
-            keyEquivalent: ""
-        )
-        access.target = self
-        menu.addItem(access)
-        menu.addItem(.separator())
-
         let settings = NSMenuItem(
             title: "Settings…",
             action: #selector(openSettings),
@@ -353,14 +366,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         quit.target = self
         menu.addItem(quit)
 
-        return (menu, access)
+        return menu
     }
 
     private func updateStatus(_ status: AuthorizationMonitorStatus) {
-        accessMenuItem?.title = status.accessibilityTrusted
-            ? "Accessibility: Allowed"
-            : "Request Accessibility Access…"
-        accessMenuItem?.isEnabled = !status.accessibilityTrusted
+        accessibilityPermission.update(isGranted: status.accessibilityTrusted)
         if status.accessibilityTrusted {
             PermisoAssistant.shared.dismiss()
         }
@@ -403,18 +413,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    @objc
-    private func requestAccessibilityAccess() {
-        presentAccessibilityAssistant()
-    }
-
-    private func presentAccessibilityAssistant() {
-        guard !AccessibilityFocusReader.isTrusted else {
-            return
-        }
-        PermisoAssistant.shared.present(panel: .accessibility)
-    }
-
     private func setDisplayMode(_ mode: ProcessDisplayMode) {
         displayMode = mode
         UserDefaults.standard.set(mode.rawValue, forKey: ProcessDisplayMode.defaultsKey)
@@ -423,6 +421,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc
     private func openSettings() {
+        presentSettings(pamAction: nil)
+    }
+
+    private func presentSettings(pamAction action: PAMSettingsAction?) {
         NSApp.setActivationPolicy(.regular)
         let controller: SettingsWindowController
         if let settingsWindowController {
@@ -432,6 +434,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 ignoredApplications: ignoredApplications,
                 pamIntegration: pamIntegration,
                 launchAtLogin: launchAtLogin,
+                accessibilityPermission: accessibilityPermission,
                 pamConversationError: pamConversationError,
                 didClose: { [weak self] in
                     self?.settingsDidClose()
@@ -441,7 +444,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             controller = created
         }
         controller.updatePAMConversationError(pamConversationError)
-        controller.present()
+        if let action {
+            controller.presentPAMAction(action)
+        } else {
+            controller.present()
+        }
     }
 
     @objc

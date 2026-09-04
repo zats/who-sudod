@@ -16,6 +16,7 @@ struct AuthenticationPromptSession: Equatable, Sendable {
     let firstSeenAt: Date
     let promptSequence: Int
     var processSnapshot: AuthenticationProcessSnapshot
+    var hasAttributedSnapshot: Bool
     var lastSeenAt: Date
     var consecutiveMissingObservations: Int
 }
@@ -55,6 +56,7 @@ struct AuthenticationPromptSessionStore {
             firstSeenAt: date,
             promptSequence: nextPromptSequence,
             processSnapshot: .pending,
+            hasAttributedSnapshot: false,
             lastSeenAt: date,
             consecutiveMissingObservations: 0
         )
@@ -82,6 +84,7 @@ struct AuthenticationPromptSessionStore {
         let key = AuthenticationPromptSessionKey(window: window)
         var session = sessions[key] ?? activate(window: window, at: date)
         session.processSnapshot = processSnapshot
+        session.hasAttributedSnapshot = true
         session.lastSeenAt = date
         session.consecutiveMissingObservations = 0
         sessions[key] = session
@@ -98,7 +101,8 @@ struct AuthenticationPromptSessionStore {
             return activate(window: newWindow, at: date)
         }
 
-        if var existingDestination = sessions[newKey] {
+        if var existingDestination = sessions[newKey],
+           existingDestination.hasAttributedSnapshot {
             existingDestination.lastSeenAt = date
             existingDestination.consecutiveMissingObservations = 0
             sessions[newKey] = existingDestination
@@ -117,7 +121,8 @@ struct AuthenticationPromptSessionStore {
     mutating func observeVisibleCoreGraphicsWindows(
         _ windows: [AuthenticationWindowSnapshot],
         at date: Date,
-        requiredMissingObservations: Int = 3
+        requiredMissingObservations: Int = 3,
+        preserving preservedKeys: Set<AuthenticationPromptSessionKey> = []
     ) {
         precondition(requiredMissingObservations > 0)
         let visibleKeys = Set(windows.map(AuthenticationPromptSessionKey.init(window:)))
@@ -131,6 +136,9 @@ struct AuthenticationPromptSessionStore {
                 session.lastSeenAt = date
                 session.consecutiveMissingObservations = 0
                 sessions[key] = session
+                continue
+            }
+            guard !preservedKeys.contains(key) else {
                 continue
             }
 
@@ -150,7 +158,8 @@ struct AuthenticationPromptSessionStore {
     mutating func observeVisibleAccessibilityWindows(
         _ windows: [AuthenticationWindowSnapshot],
         at date: Date,
-        requiredMissingObservations: Int = 3
+        requiredMissingObservations: Int = 3,
+        preserving preservedKeys: Set<AuthenticationPromptSessionKey> = []
     ) {
         precondition(requiredMissingObservations > 0)
         let visibleKeys = Set(windows.map(AuthenticationPromptSessionKey.init(window:)))
@@ -166,6 +175,9 @@ struct AuthenticationPromptSessionStore {
                 sessions[key] = session
                 continue
             }
+            guard !preservedKeys.contains(key) else {
+                continue
+            }
 
             session.consecutiveMissingObservations += 1
             if session.consecutiveMissingObservations >= requiredMissingObservations {
@@ -178,6 +190,10 @@ struct AuthenticationPromptSessionStore {
 
     mutating func remove(window: AuthenticationWindowSnapshot) {
         sessions.removeValue(forKey: AuthenticationPromptSessionKey(window: window))
+    }
+
+    mutating func remove(key: AuthenticationPromptSessionKey) {
+        sessions.removeValue(forKey: key)
     }
 
     mutating func removeAll() {

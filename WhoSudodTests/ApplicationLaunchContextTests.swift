@@ -15,6 +15,14 @@ final class ApplicationLaunchContextTests: XCTestCase {
         )
     }
 
+    func testDoesNotStartMonitorInsideXcodePreviewHost() {
+        XCTAssertFalse(
+            ApplicationLaunchContext.shouldStartMonitor(
+                environment: ["XCODE_RUNNING_FOR_PREVIEWS": "1"]
+            )
+        )
+    }
+
     func testSettingsCloseShortcutRequiresOnlyCommandQ() throws {
         XCTAssertTrue(
             SettingsKeyboardShortcut.closesSettings(
@@ -47,9 +55,9 @@ final class ApplicationLaunchContextTests: XCTestCase {
     }
 
     @MainActor
-    func testStatusMenuDoesNotContainPAMControls() {
+    func testStatusMenuContainsOnlySettingsAndQuit() {
         let delegate = AppDelegate()
-        let menu = delegate.makeStatusMenu().menu
+        let menu = delegate.makeStatusMenu()
         let actionTitles = menu.items
             .filter { !$0.isSeparatorItem }
             .map(\.title)
@@ -57,10 +65,12 @@ final class ApplicationLaunchContextTests: XCTestCase {
         XCTAssertEqual(
             actionTitles,
             [
-                "Request Accessibility Access…",
                 "Settings…",
                 "Quit Who Sudo'd"
             ]
+        )
+        XCTAssertFalse(
+            actionTitles.contains { $0.localizedCaseInsensitiveContains("Accessibility") }
         )
         XCTAssertFalse(actionTitles.contains { $0.localizedCaseInsensitiveContains("PAM") })
         XCTAssertFalse(delegate.dependenciesAreLoaded)
