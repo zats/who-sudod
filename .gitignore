@@ -1,5 +1,6 @@
 .DS_Store
 .build/
+.build-preview/
 DerivedData/
 /WhoSudod.xcodeproj/
 *.xcuserstate
