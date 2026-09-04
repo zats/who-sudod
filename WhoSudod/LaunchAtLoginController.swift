@@ -57,13 +57,11 @@ final class LaunchAtLoginController {
         }
 
         switch service.status {
-        case .notRegistered:
+        case .notRegistered, .notFound:
             perform { try service.register() }
             recordInitialDefaultIfAccepted()
         case .enabled, .requiresApproval:
             userDefaults.set(true, forKey: Self.initialDefaultAppliedKey)
-            refresh()
-        case .notFound:
             refresh()
         @unknown default:
             refresh()
@@ -92,12 +90,12 @@ final class LaunchAtLoginController {
 
         if enabled {
             switch service.status {
-            case .notRegistered:
+            case .notRegistered, .notFound:
                 perform { try service.register() }
                 if service.status == .requiresApproval {
                     openLoginItems()
                 }
-            case .enabled, .notFound:
+            case .enabled:
                 refresh()
             case .requiresApproval:
                 refresh()
@@ -135,7 +133,7 @@ final class LaunchAtLoginController {
         case .requiresApproval:
             .requiresApproval
         case .notFound:
-            .unavailable
+            .disabled
         @unknown default:
             .unavailable
         }

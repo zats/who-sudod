@@ -34,7 +34,7 @@ final class LaunchAtLoginControllerTests: XCTestCase {
         XCTAssertFalse(controller.isEnabled)
     }
 
-    func testMissingServiceIsUnavailableAndDoesNotRegister() {
+    func testNeverSeenServiceRegistersOnFirstRun() {
         let defaults = isolatedUserDefaults()
         let service = FakeLaunchAtLoginService(status: .notFound)
         let controller = LaunchAtLoginController(
@@ -43,10 +43,41 @@ final class LaunchAtLoginControllerTests: XCTestCase {
         )
 
         controller.applyInitialDefaultIfNeeded()
+
+        XCTAssertEqual(service.registerCallCount, 1)
+        XCTAssertEqual(controller.state, .enabled)
+        XCTAssertTrue(defaults.bool(forKey: LaunchAtLoginController.initialDefaultAppliedKey))
+    }
+
+    func testNeverSeenServiceRegistersWhenEnabledByUser() {
+        let defaults = isolatedUserDefaults()
+        defaults.set(true, forKey: LaunchAtLoginController.initialDefaultAppliedKey)
+        let service = FakeLaunchAtLoginService(status: .notFound)
+        let controller = LaunchAtLoginController(
+            service: service,
+            userDefaults: defaults
+        )
+
         controller.isEnabled = true
 
-        XCTAssertEqual(service.registerCallCount, 0)
-        XCTAssertEqual(controller.state, .unavailable)
+        XCTAssertEqual(service.registerCallCount, 1)
+        XCTAssertEqual(controller.state, .enabled)
+    }
+
+    func testFailedNeverSeenServiceRegistrationRemainsRetryable() {
+        let defaults = isolatedUserDefaults()
+        let service = FakeLaunchAtLoginService(status: .notFound)
+        service.registerError = TestError.operationFailed
+        let controller = LaunchAtLoginController(
+            service: service,
+            userDefaults: defaults
+        )
+
+        controller.applyInitialDefaultIfNeeded()
+
+        XCTAssertEqual(service.registerCallCount, 1)
+        XCTAssertEqual(controller.state, .disabled)
+        XCTAssertNotNil(controller.operationError)
         XCTAssertNil(defaults.object(forKey: LaunchAtLoginController.initialDefaultAppliedKey))
     }
 
