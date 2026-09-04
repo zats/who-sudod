@@ -48,43 +48,18 @@ struct ProcessTableRow: Equatable {
 
 enum ProcessTableRowBuilder {
     static func rows(
-        for snapshot: AuthenticationProcessSnapshot,
-        mode: ProcessDisplayMode
+        for snapshot: AuthenticationProcessSnapshot
     ) -> [ProcessTableRow] {
         snapshot.candidates.enumerated().flatMap { candidateIndex, chain in
-            rows(for: chain, candidateIndex: candidateIndex, mode: mode)
+            rows(for: chain, candidateIndex: candidateIndex)
         }
     }
 
     private static func rows(
         for chain: ProcessChain,
-        candidateIndex: Int,
-        mode: ProcessDisplayMode
+        candidateIndex: Int
     ) -> [ProcessTableRow] {
-        let visibleProcesses: ArraySlice<ProcessRecord>
-        switch mode {
-        case .fullTree:
-            visibleProcesses = chain.processes[...]
-        case .simple:
-            let nearestApplicationIndex = chain.processes.lastIndex { process in
-                guard let path = process.executablePath else {
-                    return false
-                }
-                return ProcessTablePresentationBuilder.enclosingApplicationPath(
-                    for: path
-                ) != nil
-            }
-            let startIndex: Int
-            if let nearestApplicationIndex {
-                startIndex = nearestApplicationIndex
-            } else if chain.processes.count > 1,
-                      chain.processes.first?.pid == 1 {
-                startIndex = 1
-            } else {
-                startIndex = 0
-            }
-            visibleProcesses = chain.processes[startIndex...]
-        }
+        let visibleProcesses = chain.processes[...]
 
         let ancestry = visibleProcesses.enumerated().map { depth, process in
             ProcessTableRow(
@@ -159,8 +134,7 @@ struct ProcessTableRowTransition: Equatable {
 
     init?(
         from oldRows: [ProcessTableRow],
-        to newRows: [ProcessTableRow],
-        reloadAllRetained: Bool = false
+        to newRows: [ProcessTableRow]
     ) {
         let oldIdentifiers = oldRows.compactMap(ProcessTableRowIdentifier.init)
         let newIdentifiers = newRows.compactMap(ProcessTableRowIdentifier.init)
@@ -195,8 +169,7 @@ struct ProcessTableRowTransition: Equatable {
                 guard let oldIndex = oldIndexByIdentifier[identifier] else {
                     return false
                 }
-                return reloadAllRetained
-                    || oldIndex != newIndex
+                return oldIndex != newIndex
                     || oldRows[oldIndex] != newRows[newIndex]
             }
         )
@@ -221,7 +194,7 @@ enum ProcessTablePresentationBuilder {
         for snapshot: AuthenticationProcessSnapshot,
         mode: ProcessDisplayMode
     ) -> [ProcessTablePresentationRow] {
-        rows(for: ProcessTableRowBuilder.rows(for: snapshot, mode: mode), mode: mode)
+        rows(for: ProcessTableRowBuilder.rows(for: snapshot), mode: mode)
     }
 
     static func rows(
@@ -420,9 +393,24 @@ final class ProcessTableView: NSView, NSTableViewDataSource, NSTableViewDelegate
         guard mode != displayMode else {
             return
         }
+        let visibleProcessCells = rows.indices.compactMap { row -> (ProcessNameCell, Int)? in
+            guard let cell = tableView.view(
+                atColumn: 0,
+                row: row,
+                makeIfNecessary: false
+            ) as? ProcessNameCell else {
+                return nil
+            }
+            return (cell, row)
+        }
         displayMode = mode
+        presentationRows = ProcessTablePresentationBuilder.rows(for: rows, mode: mode)
         configureColumnVisibility()
-        rebuildRows(animated: true, reloadAllRetained: true)
+        tableView.reloadData(
+            forRowIndexes: IndexSet(integersIn: rows.indices),
+            columnIndexes: IndexSet(integersIn: 1 ..< tableView.numberOfColumns)
+        )
+        updateProcessIndentation(in: visibleProcessCells, for: mode)
     }
 
     var visibleColumnIdentifiers: [NSUserInterfaceItemIdentifier] {
@@ -430,10 +418,9 @@ final class ProcessTableView: NSView, NSTableViewDataSource, NSTableViewDelegate
     }
 
     private func rebuildRows(
-        animated: Bool,
-        reloadAllRetained: Bool = false
+        animated: Bool
     ) {
-        let newRows = ProcessTableRowBuilder.rows(for: currentSnapshot, mode: displayMode)
+        let newRows = ProcessTableRowBuilder.rows(for: currentSnapshot)
         let newPresentationRows = ProcessTablePresentationBuilder.rows(
             for: newRows,
             mode: displayMode
@@ -444,8 +431,7 @@ final class ProcessTableView: NSView, NSTableViewDataSource, NSTableViewDelegate
               tableIsVisible,
               let transition = ProcessTableRowTransition(
                 from: rows,
-                to: newRows,
-                reloadAllRetained: reloadAllRetained
+                to: newRows
               ) else {
             rows = newRows
             presentationRows = newPresentationRows
@@ -495,6 +481,34 @@ final class ProcessTableView: NSView, NSTableViewDataSource, NSTableViewDelegate
                 forRowIndexes: transition.reloads,
                 columnIndexes: IndexSet(integersIn: 0 ..< tableView.numberOfColumns)
             )
+        }
+    }
+
+    private func updateProcessIndentation(
+        in cells: [(cell: ProcessNameCell, row: Int)],
+        for mode: ProcessDisplayMode
+    ) {
+        let updates = cells.map { cell, row in
+            let depth = mode == .simple ? 0 : rows[row].depth
+            return (cell, depth)
+        }
+        let tableIsVisible = animationVisibilityOverride
+            ?? (tableView.window?.isVisible == true)
+        guard tableIsVisible,
+              !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else {
+            for (cell, depth) in updates {
+                cell.setVisualDepth(depth)
+            }
+            return
+        }
+
+        tableView.layoutSubtreeIfNeeded()
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0.22
+            context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+            for (cell, depth) in updates {
+                cell.setVisualDepth(depth, animated: true)
+            }
         }
     }
 
@@ -689,6 +703,7 @@ final class ProcessTableView: NSView, NSTableViewDataSource, NSTableViewDelegate
         }
         let item = rows[row]
         let presentation = presentationRows[row]
+        let visualDepth = displayMode == .simple ? 0 : item.depth
 
         switch tableColumn.identifier {
         case Column.process:
@@ -697,7 +712,7 @@ final class ProcessTableView: NSView, NSTableViewDataSource, NSTableViewDelegate
                 cell.configure(
                     name: presentation.process,
                     icon: icon(for: process),
-                    depth: item.depth,
+                    depth: visualDepth,
                     startsCandidate: item.depth == 0 && item.candidateIndex > 0,
                     accessibilityIdentifier: cellIdentifier(row: row, column: "process")
                 )
@@ -705,7 +720,7 @@ final class ProcessTableView: NSView, NSTableViewDataSource, NSTableViewDelegate
                 cell.configure(
                     name: presentation.process,
                     icon: requestedCommandIcon(item.requestedCommand),
-                    depth: item.depth,
+                    depth: visualDepth,
                     startsCandidate: false,
                     accessibilityIdentifier: cellIdentifier(row: row, column: "process")
                 )
@@ -1000,8 +1015,7 @@ private final class ProcessNameCell: NSTableCellView {
         setAccessibilityValue(nameLabel.stringValue)
         iconView.image = icon
         iconView.isHidden = icon == nil
-        iconLeadingConstraint?.constant = 4 + CGFloat(depth) * 12
-        nameLeadingWithoutIconConstraint?.constant = 4 + CGFloat(depth) * 12
+        setVisualDepth(depth)
         nameLeadingWithIconConstraint?.isActive = false
         nameLeadingWithoutIconConstraint?.isActive = false
         if icon == nil {
@@ -1010,6 +1024,17 @@ private final class ProcessNameCell: NSTableCellView {
             nameLeadingWithIconConstraint?.isActive = true
         }
         separator.isHidden = !startsCandidate
+    }
+
+    func setVisualDepth(_ depth: Int, animated: Bool = false) {
+        let inset = 4 + CGFloat(depth) * 12
+        if animated {
+            iconLeadingConstraint?.animator().constant = inset
+            nameLeadingWithoutIconConstraint?.animator().constant = inset
+        } else {
+            iconLeadingConstraint?.constant = inset
+            nameLeadingWithoutIconConstraint?.constant = inset
+        }
     }
 
     private func updateAppearanceColors() {

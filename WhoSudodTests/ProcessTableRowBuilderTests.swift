@@ -7,7 +7,7 @@ final class ProcessTableRowBuilderTests: XCTestCase {
     func testValidationOnlySudoHasNoCommandRow() throws {
         let snapshot = sudoSnapshot(processArguments: ["sudo", "-v"])
 
-        let rows = ProcessTableRowBuilder.rows(for: snapshot, mode: .fullTree)
+        let rows = ProcessTableRowBuilder.rows(for: snapshot)
 
         XCTAssertEqual(rows.count, 1)
         XCTAssertEqual(try XCTUnwrap(rows.first).process?.name, "sudo")
@@ -19,7 +19,7 @@ final class ProcessTableRowBuilderTests: XCTestCase {
             processArguments: ["sudo", "-k", "/bin/echo", "who-sudod-child-check"]
         )
 
-        let rows = ProcessTableRowBuilder.rows(for: snapshot, mode: .fullTree)
+        let rows = ProcessTableRowBuilder.rows(for: snapshot)
 
         XCTAssertEqual(rows.count, 2)
         XCTAssertEqual(rows[0].process?.name, "sudo")
@@ -143,28 +143,6 @@ final class ProcessTableRowBuilderTests: XCTestCase {
 
         XCTAssertNil(ProcessTableRowTransition(from: [first, second], to: [second, first]))
         XCTAssertNil(ProcessTableRowTransition(from: [first, first], to: [first]))
-    }
-
-    func testRowTransitionReloadsAllRetainedRowsForModeChange() throws {
-        let requester = process(
-            pid: 300,
-            parentPID: 200,
-            name: "sudo",
-            path: "/usr/bin/sudo"
-        )
-        let rows = [row(process: requester, depth: 0, requester: requester)]
-
-        let transition = try XCTUnwrap(
-            ProcessTableRowTransition(
-                from: rows,
-                to: rows,
-                reloadAllRetained: true
-            )
-        )
-
-        XCTAssertEqual(transition.removals, IndexSet())
-        XCTAssertEqual(transition.insertions, IndexSet())
-        XCTAssertEqual(transition.reloads, IndexSet(integer: 0))
     }
 
     func testPromptAnimationPolicyUsesOnlyTheSameVisiblePrompt() {
@@ -418,7 +396,7 @@ final class ProcessTableRowBuilderTests: XCTestCase {
         )
     }
 
-    func testSimpleModeStartsAtNearestApplicationAndKeepsRequestedCommand() throws {
+    func testSimpleModeKeepsEntireTreeAndRequestedCommand() throws {
         let fixture = try applicationFixture(name: "Caller App")
         defer { try? FileManager.default.removeItem(at: fixture.root) }
         let launchd = process(pid: 1, parentPID: 0, name: "launchd", path: "/sbin/launchd")
@@ -443,18 +421,18 @@ final class ProcessTableRowBuilderTests: XCTestCase {
             attribution: .heuristicSudo
         )
 
-        let rows = ProcessTableRowBuilder.rows(for: snapshot, mode: .simple)
+        let rows = ProcessTableRowBuilder.rows(for: snapshot)
 
-        XCTAssertEqual(rows.compactMap(\.process?.pid), [100, 200, 300])
-        XCTAssertEqual(rows.map(\.depth), [0, 1, 2, 3])
+        XCTAssertEqual(rows.compactMap(\.process?.pid), [1, 100, 200, 300])
+        XCTAssertEqual(rows.map(\.depth), [0, 1, 2, 3, 4])
         XCTAssertEqual(rows.last?.requestedCommand?.executable, "/bin/echo")
         XCTAssertEqual(
             ProcessTablePresentationBuilder.rows(for: rows, mode: .simple).map(\.process),
-            ["Caller App", "helper", "sudo", "echo"]
+            ["launchd", "Caller App", "helper", "sudo", "echo"]
         )
     }
 
-    func testSimpleModeChoosesNearestOfTwoApplicationAncestors() throws {
+    func testSimpleModeKeepsAllApplicationAncestors() throws {
         let outer = try applicationFixture(name: "Outer App")
         let inner = try applicationFixture(name: "Inner App")
         defer {
@@ -488,13 +466,13 @@ final class ProcessTableRowBuilderTests: XCTestCase {
             attribution: .heuristicSudo
         )
 
-        let rows = ProcessTableRowBuilder.rows(for: snapshot, mode: .simple)
+        let rows = ProcessTableRowBuilder.rows(for: snapshot)
 
-        XCTAssertEqual(rows.compactMap(\.process?.pid), [200, 300])
-        XCTAssertEqual(rows.map(\.depth), [0, 1, 2])
+        XCTAssertEqual(rows.compactMap(\.process?.pid), [1, 100, 200, 300])
+        XCTAssertEqual(rows.map(\.depth), [0, 1, 2, 3, 4])
     }
 
-    func testSimpleModeDropsLeadingPIDOneWhenThereIsNoApplication() {
+    func testSimpleModeKeepsLeadingPIDOne() {
         let launchd = process(pid: 1, parentPID: 0, name: "launchd", path: "/sbin/launchd")
         let shell = process(pid: 200, parentPID: 1, name: "zsh", path: "/bin/zsh")
         let sudo = process(
@@ -511,10 +489,10 @@ final class ProcessTableRowBuilderTests: XCTestCase {
             attribution: .heuristicSudo
         )
 
-        let rows = ProcessTableRowBuilder.rows(for: snapshot, mode: .simple)
+        let rows = ProcessTableRowBuilder.rows(for: snapshot)
 
-        XCTAssertEqual(rows.compactMap(\.process?.pid), [200, 300])
-        XCTAssertEqual(rows.map(\.depth), [0, 1, 2])
+        XCTAssertEqual(rows.compactMap(\.process?.pid), [1, 200, 300])
+        XCTAssertEqual(rows.map(\.depth), [0, 1, 2, 3])
     }
 
     func testSimpleModeKeepsIncompleteAncestryThatDoesNotStartAtPIDOne() {
@@ -533,13 +511,13 @@ final class ProcessTableRowBuilderTests: XCTestCase {
             attribution: .heuristicSudo
         )
 
-        let rows = ProcessTableRowBuilder.rows(for: snapshot, mode: .simple)
+        let rows = ProcessTableRowBuilder.rows(for: snapshot)
 
         XCTAssertEqual(rows.compactMap(\.process?.pid), [200, 300])
         XCTAssertEqual(rows.map(\.depth), [0, 1, 2])
     }
 
-    func testSimpleModeDoesNotTreatAnUnverifiedAppPathAsAnApplication() {
+    func testSimpleModeKeepsAncestryRegardlessOfBundleResolution() {
         let launchd = process(pid: 1, parentPID: 0, name: "launchd", path: "/sbin/launchd")
         let shell = process(pid: 100, parentPID: 1, name: "zsh", path: "/bin/zsh")
         let falseApp = process(
@@ -562,13 +540,13 @@ final class ProcessTableRowBuilderTests: XCTestCase {
             attribution: .heuristicSudo
         )
 
-        let rows = ProcessTableRowBuilder.rows(for: snapshot, mode: .simple)
+        let rows = ProcessTableRowBuilder.rows(for: snapshot)
 
-        XCTAssertEqual(rows.compactMap(\.process?.pid), [100, 200, 300])
-        XCTAssertEqual(rows.map(\.depth), [0, 1, 2, 3])
+        XCTAssertEqual(rows.compactMap(\.process?.pid), [1, 100, 200, 300])
+        XCTAssertEqual(rows.map(\.depth), [0, 1, 2, 3, 4])
     }
 
-    func testSimpleModeFiltersAndRebasesEachCandidateIndependently() throws {
+    func testSimpleModePreservesEachCandidateTree() throws {
         let fixture = try applicationFixture(name: "Caller App")
         defer { try? FileManager.default.removeItem(at: fixture.root) }
         let launchd = process(pid: 1, parentPID: 0, name: "launchd", path: "/sbin/launchd")
@@ -595,11 +573,11 @@ final class ProcessTableRowBuilderTests: XCTestCase {
             ]
         )
 
-        let rows = ProcessTableRowBuilder.rows(for: snapshot, mode: .simple)
+        let rows = ProcessTableRowBuilder.rows(for: snapshot)
 
         XCTAssertEqual(
             rows.map { "\($0.candidateIndex):\($0.process?.pid ?? -1):\($0.depth)" },
-            ["0:100:0", "0:300:1", "1:400:0", "1:500:1"]
+            ["0:1:0", "0:100:1", "0:300:2", "1:1:0", "1:400:1", "1:500:2"]
         )
     }
 
@@ -613,7 +591,7 @@ final class ProcessTableRowBuilderTests: XCTestCase {
         )
 
         XCTAssertEqual(
-            ProcessTableRowBuilder.rows(for: snapshot, mode: .simple).compactMap(\.process?.pid),
+            ProcessTableRowBuilder.rows(for: snapshot).compactMap(\.process?.pid),
             [1]
         )
     }
@@ -642,7 +620,7 @@ final class ProcessTableRowBuilderTests: XCTestCase {
             attribution: .heuristicSudo
         )
 
-        let rows = ProcessTableRowBuilder.rows(for: snapshot, mode: .simple)
+        let rows = ProcessTableRowBuilder.rows(for: snapshot)
 
         XCTAssertEqual(rows.compactMap(\.process?.pid), [100, 300, 400])
         XCTAssertTrue(rows.allSatisfy { $0.requestedCommand == nil })
@@ -663,7 +641,7 @@ final class ProcessTableRowBuilderTests: XCTestCase {
             requestKind: .sudo,
             attribution: .heuristicSudo
         )
-        let rows = ProcessTableRowBuilder.rows(for: snapshot, mode: .simple)
+        let rows = ProcessTableRowBuilder.rows(for: snapshot)
         let presentation = ProcessTablePresentationBuilder.rows(for: rows, mode: .simple)
 
         XCTAssertEqual(presentation.map(\.process), ["sudo", "echo"])
@@ -819,8 +797,30 @@ final class ProcessTableRowBuilderTests: XCTestCase {
 
     @MainActor
     func testChangingDisplayModeReusesSnapshotAndChangesVisibleColumns() {
-        let snapshot = sudoSnapshot(
-            processArguments: ["sudo", "-k", "/bin/echo", "who-sudod-child-check"]
+        let launchd = process(
+            pid: 1,
+            parentPID: 0,
+            name: "launchd",
+            path: "/sbin/launchd"
+        )
+        let shell = process(
+            pid: 200,
+            parentPID: 1,
+            name: "zsh",
+            path: "/bin/zsh"
+        )
+        let sudo = process(
+            pid: 300,
+            parentPID: 200,
+            name: "sudo",
+            path: "/usr/bin/sudo",
+            arguments: ["sudo", "-k", "/bin/echo", "who-sudod-child-check"]
+        )
+        let snapshot = snapshot(
+            records: [launchd, shell, sudo],
+            requester: sudo,
+            requestKind: .sudo,
+            attribution: .heuristicSudo
         )
         let table = ProcessTableView(
             frame: NSRect(x: 0, y: 0, width: 760, height: 240),
@@ -839,10 +839,17 @@ final class ProcessTableRowBuilderTests: XCTestCase {
         window.displayIfNeeded()
 
         XCTAssertEqual(table.visibleColumnIdentifiers.map(\.rawValue), ["process"])
+        let simpleRows = table.renderedTable().rows
         XCTAssertEqual(
-            table.renderedTable().rows,
+            simpleRows,
             ProcessTablePresentationBuilder.rows(for: snapshot, mode: .simple)
         )
+        let simpleIconOffsets = processIconOffsets(in: table)
+        XCTAssertEqual(simpleIconOffsets.count, simpleRows.count)
+        for offset in simpleIconOffsets {
+            XCTAssertEqual(offset, 4, accuracy: 0.5)
+        }
+        let simpleCellIdentities = processCellIdentities(in: table)
 
         table.setDisplayMode(.fullTree)
         window.layoutIfNeeded()
@@ -852,10 +859,30 @@ final class ProcessTableRowBuilderTests: XCTestCase {
             table.visibleColumnIdentifiers.map(\.rawValue),
             ["process", "pid", "path"]
         )
+        let fullTreeRows = table.renderedTable().rows
         XCTAssertEqual(
-            table.renderedTable().rows,
+            fullTreeRows,
             ProcessTablePresentationBuilder.rows(for: snapshot, mode: .fullTree)
         )
+        XCTAssertEqual(simpleRows.map(\.process), fullTreeRows.map(\.process))
+        XCTAssertEqual(simpleRows.map(\.depth), fullTreeRows.map(\.depth))
+        XCTAssertEqual(simpleRows.map(\.candidateIndex), fullTreeRows.map(\.candidateIndex))
+        let fullTreeIconOffsets = processIconOffsets(in: table)
+        XCTAssertEqual(fullTreeIconOffsets.count, fullTreeRows.count)
+        for (offset, row) in zip(fullTreeIconOffsets, fullTreeRows) {
+            XCTAssertEqual(offset, 4 + CGFloat(row.depth) * 12, accuracy: 0.5)
+        }
+        XCTAssertEqual(processCellIdentities(in: table), simpleCellIdentities)
+
+        table.setDisplayMode(.simple)
+        window.layoutIfNeeded()
+        window.displayIfNeeded()
+
+        XCTAssertEqual(table.renderedTable().rows, simpleRows)
+        XCTAssertEqual(processCellIdentities(in: table), simpleCellIdentities)
+        for offset in processIconOffsets(in: table) {
+            XCTAssertEqual(offset, 4, accuracy: 0.5)
+        }
     }
 
     @MainActor
@@ -1366,6 +1393,41 @@ final class ProcessTableRowBuilderTests: XCTestCase {
         let sudo = ProcessRecord(
             pid: 300,
             parentPID: 0,
+    @MainActor
+    private func processIconOffsets(in processTable: ProcessTableView) -> [CGFloat] {
+        guard let tableView = firstSubview(of: NSTableView.self, in: processTable) else {
+            return []
+        }
+        return (0 ..< tableView.numberOfRows).compactMap { row in
+            guard let cell = tableView.view(
+                atColumn: 0,
+                row: row,
+                makeIfNecessary: true
+            ) as? NSTableCellView,
+            let icon = cell.imageView else {
+                return nil
+            }
+            cell.layoutSubtreeIfNeeded()
+            return icon.frame.minX
+        }
+    }
+
+    @MainActor
+    private func processCellIdentities(
+        in processTable: ProcessTableView
+    ) -> [ObjectIdentifier] {
+        guard let tableView = firstSubview(of: NSTableView.self, in: processTable) else {
+            return []
+        }
+        return (0 ..< tableView.numberOfRows).compactMap { row in
+            tableView.view(
+                atColumn: 0,
+                row: row,
+                makeIfNecessary: true
+            ).map(ObjectIdentifier.init)
+        }
+    }
+
             realUserID: 502,
             name: "sudo",
             executablePath: "/usr/bin/sudo",
